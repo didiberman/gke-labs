@@ -1,0 +1,165 @@
+# ==============================================================================
+# observability/values.dev.yaml
+#
+# Development / Lab environment overrides.
+# Apply on top of values.yaml:
+#   helm upgrade --install observability . \
+#     -f values.yaml -f values.dev.yaml \
+#     --namespace observability --create-namespace
+#
+# Goals:
+#   • Reduce storage sizes (cheaper, faster PVC provisioning)
+#   • Drop CPU/memory requests so a 3-node e2-standard-2 cluster can fit
+#     the entire observability stack alongside application workloads
+#   • Single replicas everywhere — no HA overhead
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# kube-prometheus-stack overrides
+# ------------------------------------------------------------------------------
+kube-prometheus-stack:
+
+  prometheusOperator:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  prometheus:
+    prometheusSpec:
+      # Shorter retention keeps disk usage under control in dev
+      retention: 3d
+      scrapeInterval: "60s"
+      evaluationInterval: "60s"
+
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 500m
+          memory: 1Gi
+
+      # Smaller PVC for dev clusters
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: standard
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 10Gi   # ↓ from 20Gi
+
+  alertmanager:
+    alertmanagerSpec:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: standard
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 2Gi   # ↓ from 5Gi
+
+  grafana:
+    # Smaller persistence for dev
+    persistence:
+      size: 5Gi   # ↓ from 10Gi
+
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+    # In dev it's handy to be able to browse without a password
+    # (still requires the adminPassword above — this just adds anon read access)
+    grafana.ini:
+      auth.anonymous:
+        enabled: true
+        org_role: Viewer
+      unified_alerting:
+        enabled: true
+      feature_toggles:
+        enable: "traceqlEditor"
+
+  kube-state-metrics:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
+
+  prometheus-node-exporter:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+# ------------------------------------------------------------------------------
+# Loki overrides
+# ------------------------------------------------------------------------------
+loki:
+  loki:
+    limits_config:
+      retention_period: 168h    # 7 days in dev (↓ from 31 days)
+      ingestion_rate_mb: 4
+      ingestion_burst_size_mb: 8
+
+  singleBinary:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    persistence:
+      size: 10Gi   # ↓ from 20Gi
+
+  gateway:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 50m
+        memory: 32Mi
+
+# ------------------------------------------------------------------------------
+# Tempo overrides
+# ------------------------------------------------------------------------------
+tempo:
+  tempo:
+    retention: 168h   # 7 days in dev
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  persistence:
+    size: 5Gi   # ↓ from 10Gi

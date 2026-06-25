@@ -1,0 +1,23 @@
+{{/*
+service.yaml — ClusterIP Service for payments-api.
+
+Exposes the application on the configured port and maps it to the
+container's targetPort. The Service selector uses stable selectorLabels
+so that it survives rolling upgrades cleanly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "payments-api.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "payments-api.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "payments-api.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      protocol: TCP
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}

@@ -1,0 +1,347 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CI — Continuous Integration
+#
+# Runs on every push to `main` / `develop` and on every pull-request targeting
+# `main`.  The four jobs are:
+#
+#   1. lint-terraform  – format-check + validate every Terraform environment
+#   2. lint-helm       – helm lint every chart under helm/
+#   3. docker-build    – build the httpbin Docker image and scan with Trivy
+#   4. terraform-plan  – (PRs only) plan each env and post the diff as a comment
+#
+# Required GitHub repository variables:
+#   vars.GCP_PROJECT_ID
+#
+# Required GitHub repository secrets:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER
+#   secrets.GCP_SERVICE_ACCOUNT
+# ──────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+# Cancel any in-flight runs for the same branch/PR so we don't waste runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GCP_PROJECT_ID:                ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION:                    europe-west1
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT:           ${{ secrets.GCP_SERVICE_ACCOUNT }}
+  # Terraform version pinned for reproducibility – bump deliberately.
+  TF_VERSION: "1.8.5"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 1 – Terraform Lint
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+  lint-terraform:
+    name: "Lint · Terraform"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # Wrap terraform so that the raw plan JSON is available to later steps.
+          terraform_wrapper: true
+
+      # ── Format check ────────────────────────────────────────────────────────
+      # `terraform fmt -check -recursive` exits non-zero if any file is
+      # not canonical.  Run it from the repo root so it covers all modules
+      # and environments in one pass.
+      - name: Terraform fmt (root)
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      # ── Validate each environment ────────────────────────────────────────────
+      # `terraform validate` requires an initialised working directory.
+      # We use `-backend=false` so no real GCS bucket is needed in CI.
+      - name: Terraform init + validate (dev)
+        run: |
+          terraform init -backend=false
+          terraform validate
+        working-directory: terraform/environments/dev
+
+      # Add more environment blocks here as new envs are created, e.g.:
+      # - name: Terraform init + validate (staging)
+      #   run: |
+      #     terraform init -backend=false
+      #     terraform validate
+      #   working-directory: terraform/environments/staging
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2 – Helm Lint
+  # ──────────────────────────────────────────────────────────────────────────
+  lint-helm:
+    name: "Lint · Helm"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # azure/setup-helm is the canonical action; pin to a specific version.
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.15.2"
+
+      # Lint every top-level chart directory found under helm/.
+      # We use `helm lint --strict` so warnings are treated as errors.
+      # Each chart is linted against its default values PLUS any
+      # environment-specific override file when present.
+      - name: Helm lint – payments-api
+        run: |
+          helm lint helm/payments-api --strict
+        # If you have per-env values files, chain them with -f:
+        # helm lint helm/payments-api --strict \
+        #   -f helm/payments-api/values-dev.yaml
+
+      - name: Helm lint – observability
+        run: |
+          helm lint helm/observability --strict
+        # Same pattern for additional charts.
+
+      # Dynamic discovery: uncomment if you want to auto-discover all charts
+      # - name: Helm lint – all charts
+      #   run: |
+      #     for chart in helm/*/; do
+      #       echo "▶ Linting $chart"
+      #       helm lint "$chart" --strict
+      #     done
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 3 – Docker Build + Trivy Security Scan
+  # ──────────────────────────────────────────────────────────────────────────
+  docker-build:
+    name: "Build · Docker + Trivy"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required by the Trivy action to upload SARIF results to GitHub
+      # Security → Code scanning.
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Set up Docker Buildx so we can use BuildKit features (cache, multi-arch).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the image but do NOT push — we only need the local image for the
+      # Trivy scan.  The real push happens in the CD workflows after approval.
+      - name: Build httpbin image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/httpbin
+          file:    docker/httpbin/Dockerfile
+          push:    false
+          # Cache layers from/to GitHub Actions cache to speed up repeated builds.
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          # Tag the local image so Trivy can reference it by name.
+          tags: httpbin:${{ github.sha }}
+          # Export the image to the Docker daemon so Trivy can scan it.
+          load: true
+
+      # ── Trivy vulnerability scan ─────────────────────────────────────────────
+      # Trivy scans the locally-loaded image and fails the job if any
+      # CRITICAL vulnerabilities are found (exit-code: 1).
+      # Results are also uploaded as SARIF so they appear in the Security tab.
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref:    "httpbin:${{ github.sha }}"
+          format:       "sarif"
+          output:       "trivy-results.sarif"
+          # Fail the build on CRITICAL severity findings.
+          severity:     "CRITICAL"
+          exit-code:    "1"
+          # Ignore unfixed vulnerabilities to reduce noise; remove if you want
+          # to see everything.
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        # Upload even if the scan step above failed so we always get the report.
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 4 – Terraform Plan (Pull Requests only)
+  #
+  # Authenticates to GCP using Workload Identity Federation (no long-lived
+  # service-account keys stored as secrets).  Plans every environment and
+  # posts the diff as a comment on the PR so reviewers can see the impact
+  # without leaving GitHub.
+  # ──────────────────────────────────────────────────────────────────────────
+  terraform-plan:
+    name: "Plan · Terraform"
+    # Only run on pull-request events — skip on direct pushes to main/develop.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Needs both jobs above to pass before we do expensive GCP auth.
+    needs:
+      - lint-terraform
+      - lint-helm
+    permissions:
+      contents:      read
+      # Required to post the plan comment back to the PR.
+      pull-requests: write
+      # Required by google-github-actions/auth for OIDC token exchange.
+      id-token:      write
+
+    strategy:
+      # Plan all environments in parallel; fail-fast=false means we see all
+      # plans even if one environment fails.
+      fail-fast: false
+      matrix:
+        environment:
+          - dev
+          # - staging   # uncomment when staging env exists
+          # - prod      # uncomment when prod env exists
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: true
+
+      # ── Authenticate to GCP via Workload Identity Federation ────────────────
+      # This is the recommended keyless approach — no JSON key file is stored
+      # as a secret.  The OIDC token from GitHub Actions is exchanged for a
+      # short-lived Google access token.
+      #
+      # Prerequisites (one-time setup):
+      #   1. Create a Workload Identity Pool + Provider in your GCP project.
+      #   2. Grant the SA the "roles/iam.workloadIdentityUser" binding.
+      #   3. Store the provider resource name and SA email as repo secrets.
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      # ── Terraform init ───────────────────────────────────────────────────────
+      # Initialise with the real GCS backend so the plan is against actual state.
+      - name: Terraform init (${{ matrix.environment }})
+        id: init
+        run: terraform init
+        working-directory: terraform/environments/${{ matrix.environment }}
+        env:
+          # Pass project-level vars so backend config can be templated.
+          TF_VAR_project_id: ${{ env.GCP_PROJECT_ID }}
+          TF_VAR_region:     ${{ env.GCP_REGION }}
+
+      # ── Terraform plan ───────────────────────────────────────────────────────
+      # Save the plan to a file so we can render it cleanly in the PR comment.
+      # `-out` produces a binary plan; we use `terraform show` to convert it.
+      - name: Terraform plan (${{ matrix.environment }})
+        id: plan
+        run: |
+          terraform plan \
+            -var="project_id=${{ env.GCP_PROJECT_ID }}" \
+            -var="region=${{ env.GCP_REGION }}" \
+            -out=tfplan.binary \
+            -no-color 2>&1 | tee plan.txt
+          # Convert the binary plan to human-readable text for the PR comment.
+          terraform show -no-color tfplan.binary >> plan-human.txt
+        working-directory: terraform/environments/${{ matrix.environment }}
+        # Don't fail the job if plan returns exit code 2 (changes detected).
+        continue-on-error: true
+
+      # ── Post plan as PR comment ──────────────────────────────────────────────
+      # We use the GitHub REST API via the `gh` CLI so we can render a
+      # collapsible <details> block that keeps the PR comment readable.
+      - name: Post Terraform plan comment
+        uses: actions/github-script@v7
+        if: always()
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+          ENVIRONMENT:  ${{ matrix.environment }}
+        with:
+          script: |
+            const fs   = require('fs');
+            const env  = process.env.ENVIRONMENT;
+            const outcome = process.env.PLAN_OUTCOME;
+
+            // Read the plan output (fall back to a short message on error).
+            let planText = '(plan output unavailable)';
+            try {
+              planText = fs.readFileSync(
+                `terraform/environments/${env}/plan-human.txt`, 'utf8'
+              ).slice(0, 60000); // GitHub comment limit is ~65 536 chars
+            } catch (_) {}
+
+            const statusIcon = outcome === 'success' ? '✅' : '❌';
+            const body = [
+              `## ${statusIcon} Terraform Plan — \`${env}\``,
+              '',
+              `**Workflow:** \`${context.workflow}\`  `,
+              `**Commit:** \`${context.sha.slice(0,7)}\``,
+              '',
+              '<details><summary>📋 Click to expand plan output</summary>',
+              '',
+              '```hcl',
+              planText,
+              '```',
+              '',
+              '</details>',
+            ].join('\n');
+
+            // Find and update an existing plan comment, or create a new one.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner:      context.repo.owner,
+              repo:       context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker    = `<!-- tf-plan-${env} -->`;
+            const existing  = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body:       marker + '\n' + body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body:         marker + '\n' + body,
+              });
+            }
+
+      # Fail the job if the plan itself failed (we used continue-on-error above
+      # only so the comment step could still run).
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1

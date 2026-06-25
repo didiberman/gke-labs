@@ -1,0 +1,122 @@
+# =============================================================================
+# values.dev.yaml — Dev / local-kind environment overrides for Temporal
+# =============================================================================
+# Apply on top of values.yaml:
+#
+#   helm upgrade --install temporal helm/temporal \
+#     -f helm/temporal/values.yaml \
+#     -f helm/temporal/values.dev.yaml \
+#     -n temporal --create-namespace
+#
+# Goals:
+#   • Minimal resource footprint so the chart fits on a 3-node kind cluster
+#   • Single replicas everywhere (no HA)
+#   • Debug-level logging
+#   • Schema auto-setup always on (dev schema may be rebuilt frequently)
+#   • Relaxed CORS and no ingress TLS
+# =============================================================================
+
+temporal:
+  # ── Server ──────────────────────────────────────────────────────────────────
+  server:
+    replicaCount: 1
+
+    resources:
+      requests:
+        cpu:    100m
+        memory: 256Mi
+      limits:
+        cpu:    500m
+        memory: 512Mi
+
+    config:
+      logLevel: "debug"
+
+      # Shorter retention for dev — keeps the DB small.
+      namespaces:
+        - name: default
+          retention: 24h
+
+    # In dev we still run Cloud SQL proxy (pointing to a dev Cloud SQL instance
+    # or a local postgres via host.docker.internal when using kind).
+    # Override the instance connection name via:
+    #   kubectl create configmap temporal-cloudsql-config \
+    #     --from-literal=instance_connection_name=PROJECT:REGION:INSTANCE
+    additionalContainers:
+      - name: cloud-sql-proxy
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+        args:
+          - "--structured-logs"
+          - "--port=5432"
+          - "$(CLOUD_SQL_INSTANCE)"
+        env:
+          - name: CLOUD_SQL_INSTANCE
+            valueFrom:
+              configMapKeyRef:
+                name: temporal-cloudsql-config
+                key:  instance_connection_name
+        volumeMounts:
+          - name:      cloudsql-credentials
+            mountPath: /secrets/cloudsql
+            readOnly:  true
+        resources:
+          requests:
+            cpu:    25m
+            memory: 32Mi
+          limits:
+            cpu:    100m
+            memory: 64Mi
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+
+    # Relaxed Prometheus annotations (still useful for local Prometheus in kind).
+    podAnnotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port:   "9090"
+      prometheus.io/path:   "/metrics"
+
+  # ── Web UI ───────────────────────────────────────────────────────────────────
+  web:
+    enabled: true
+    replicaCount: 1
+
+    service:
+      type: NodePort   # expose directly on kind without an ingress controller
+      port: 8080
+
+    resources:
+      requests:
+        cpu:    50m
+        memory: 64Mi
+      limits:
+        cpu:    200m
+        memory: 128Mi
+
+    additionalEnv:
+      # Allow requests from any localhost origin in dev.
+      - name: TEMPORAL_CORS_ORIGINS
+        value: "http://localhost:3000,http://localhost:8080,http://localhost:5173"
+
+  # ── Admin tools ──────────────────────────────────────────────────────────────
+  admintools:
+    enabled: true
+    resources:
+      requests:
+        cpu:    25m
+        memory: 32Mi
+      limits:
+        cpu:    100m
+        memory: 128Mi
+
+  # ── Schema migrations — always run in dev ────────────────────────────────────
+  schema:
+    setup:
+      enabled: true
+    update:
+      enabled: true
+
+  # ── ServiceMonitor disabled in dev (no Prometheus Operator in kind by default)
+  serviceMonitor:
+    enabled: false

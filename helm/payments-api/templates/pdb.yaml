@@ -1,0 +1,27 @@
+{{/*
+pdb.yaml — PodDisruptionBudget for payments-api.
+
+Protects the deployment during voluntary disruptions such as node drains,
+cluster upgrades, and maintenance operations. Conditionally created when
+podDisruptionBudget.enabled=true.
+
+Only one of minAvailable / maxUnavailable should be set in values.yaml.
+*/}}
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "payments-api.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "payments-api.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "payments-api.selectorLabels" . | nindent 6 }}
+  {{- if .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- else if .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+{{- end }}

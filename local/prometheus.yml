@@ -1,0 +1,163 @@
+# =============================================================================
+# prometheus.yml — Local lab Prometheus configuration
+# =============================================================================
+# Scrapes:
+#   1. prometheus       — self-monitoring
+#   2. temporal         — Temporal server built-in metrics endpoint
+#   3. httpbin          — HTTP echo service (stub metrics)
+#   4. postgres-exp     — postgres_exporter (optional; start separately)
+#   5. loki             — Loki metrics
+#   6. tempo            — Tempo metrics
+#   7. grafana          — Grafana metrics
+#
+# To reload without restart:
+#   curl -s -X POST http://localhost:9090/-/reload
+# =============================================================================
+
+global:
+  # Default scrape frequency — individual jobs can override.
+  scrape_interval:     15s
+  # Max time to wait for a scrape to complete.
+  scrape_timeout:      10s
+  # How often to evaluate alerting / recording rules.
+  evaluation_interval: 15s
+
+  # Labels added to every time series produced by this Prometheus instance.
+  # Useful when ingesting into a remote Prometheus / Thanos / Mimir.
+  external_labels:
+    environment: "local"
+    cluster:     "docker-compose"
+
+# ── Alertmanager (disabled locally — uncomment to enable) ──────────────────────
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+# ── Recording / alerting rules ────────────────────────────────────────────────
+# rule_files:
+#   - "/etc/prometheus/rules/*.yml"
+
+# ── Scrape configurations ─────────────────────────────────────────────────────
+scrape_configs:
+
+  # --------------------------------------------------------------------------
+  # 1. Prometheus — self-monitoring
+  # --------------------------------------------------------------------------
+  - job_name: "prometheus"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          service: "prometheus"
+
+  # --------------------------------------------------------------------------
+  # 2. Temporal server
+  # Temporal exposes Prometheus metrics on port 9090 when
+  # PROMETHEUS_ENDPOINT is set in the container environment.
+  # --------------------------------------------------------------------------
+  - job_name: "temporal"
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["temporal:9090"]
+        labels:
+          service:   "temporal"
+          component: "server"
+    # Keep only useful temporal metrics by default (comment out to get all).
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        # Drop high-cardinality internal metrics if they cause performance issues.
+        regex: "go_(gc|goroutine|memstats).*"
+        action: drop
+
+  # --------------------------------------------------------------------------
+  # 3. httpbin — HTTP testing service
+  # httpbin itself does not expose /metrics, so we use a blackbox-style check.
+  # This job documents the pattern; replace with a real exporter if available.
+  # --------------------------------------------------------------------------
+  - job_name: "httpbin"
+    scrape_interval: 30s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["httpbin:80"]
+        labels:
+          service: "httpbin"
+    # If httpbin returns a non-200 for /metrics, Prometheus will mark it down.
+    # That's expected — the label helps identify the service in dashboards.
+
+  # --------------------------------------------------------------------------
+  # 4. PostgreSQL exporter (optional)
+  # Start postgres_exporter separately:
+  #
+  #   docker run -d \
+  #     -e DATA_SOURCE_NAME="postgresql://payments:localpassword@postgres:5432/payments?sslmode=disable" \
+  #     -p 9187:9187 \
+  #     --network gke-labs_lab \
+  #     --name postgres-exporter \
+  #     quay.io/prometheuscommunity/postgres-exporter
+  #
+  # This job will show as DOWN until the exporter is running — that's fine.
+  # --------------------------------------------------------------------------
+  - job_name: "postgres"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          service: "postgres"
+          db:      "payments"
+    metric_relabel_configs:
+      # Normalise instance label to just the host for readability.
+      - source_labels: [instance]
+        regex: ".*"
+        target_label: instance
+        replacement: "local-postgres"
+
+  # --------------------------------------------------------------------------
+  # 5. Loki metrics
+  # --------------------------------------------------------------------------
+  - job_name: "loki"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["loki:3100"]
+        labels:
+          service: "loki"
+
+  # --------------------------------------------------------------------------
+  # 6. Tempo metrics
+  # --------------------------------------------------------------------------
+  - job_name: "tempo"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["tempo:3200"]
+        labels:
+          service: "tempo"
+
+  # --------------------------------------------------------------------------
+  # 7. Grafana metrics
+  # Grafana exposes /metrics with internal instrumentation.
+  # --------------------------------------------------------------------------
+  - job_name: "grafana"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["grafana:3000"]
+        labels:
+          service: "grafana"
+
+  # --------------------------------------------------------------------------
+  # 8. Redis exporter (optional)
+  # Start redis_exporter separately or add to docker-compose:
+  #
+  #   docker run -d \
+  #     -e REDIS_ADDR=redis://redis:6379 \
+  #     -e REDIS_PASSWORD=localpassword \
+  #     -p 9121:9121 \
+  #     --network gke-labs_lab \
+  #     --name redis-exporter \
+  #     oliver006/redis_exporter
+  # --------------------------------------------------------------------------
+  - job_name: "redis"
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          service: "redis"

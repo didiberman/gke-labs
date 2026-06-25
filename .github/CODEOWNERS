@@ -1,0 +1,43 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CODEOWNERS — Automatic Review Requirements
+#
+# GitHub automatically requests a review from the listed owner(s) whenever a
+# pull request modifies a file matching that pattern.  Rules are matched in
+# order from LAST to FIRST, so more-specific patterns below override broader
+# ones above.
+#
+# Docs: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Syntax:  <pattern>  <@owner-or-team> [<@additional-owner> ...]
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Default owner for everything not matched below ───────────────────────────
+# Remove or replace with a specific team if you don't want a catch-all.
+# *   @gke-labs-team
+
+# ── Infrastructure — Terraform ───────────────────────────────────────────────
+# Any change under terraform/ (modules, environments, provider configs)
+# requires review from the infra/platform team.
+/terraform/                         @gke-labs-team
+
+# ── Application delivery — Helm ──────────────────────────────────────────────
+# Helm chart changes affect live deployments; require team sign-off.
+/helm/                              @gke-labs-team
+
+# ── CI/CD pipelines & repo configuration ─────────────────────────────────────
+# Workflow files and GitHub config can escalate privileges or modify deployments;
+# these should never be auto-approved.
+/.github/                           @gke-labs-team
+
+# ── Docker images ─────────────────────────────────────────────────────────────
+# Changes to Dockerfiles or the docker/ directory affect the built artifact.
+/docker/                            @gke-labs-team
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+# Docs changes have a lighter touch — no required reviewer, just FYI.
+# /docs/                            @gke-labs-team
+
+# ── Example: specialised sub-team ownership ───────────────────────────────────
+# If you have a dedicated security team that owns scanning config:
+# /terraform/modules/security/      @gke-labs-security-team
+# /.github/workflows/ci.yml        @gke-labs-security-team @gke-labs-team

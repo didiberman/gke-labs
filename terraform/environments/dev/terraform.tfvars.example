@@ -1,0 +1,49 @@
+################################################################################
+# GKE Labs — Dev Environment Variable Values (EXAMPLE)
+# Project : gke-labs
+# Region  : europe-west1
+#
+# USAGE
+# -----
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your real values
+#   terraform init
+#   terraform plan -out=tfplan
+#   terraform apply tfplan
+#
+# SECURITY NOTES
+# --------------
+#   • terraform.tfvars is listed in .gitignore — never commit it.
+#   • Do NOT add passwords here.  DB passwords and JWT secrets are generated
+#     automatically by random_password resources in main.tf and stored only
+#     in Terraform state and Google Secret Manager.
+#   • For CI/CD pipelines, supply project_id via the TF_VAR_project_id
+#     environment variable instead of a tfvars file.
+################################################################################
+
+# ── Required ──────────────────────────────────────────────────────────────────
+
+# Your GCP project ID (not the project name or project number).
+# Find it with: gcloud projects list
+project_id = "YOUR_PROJECT_ID"  # <-- Replace with your real project ID
+
+# ── Optional (defaults shown) ─────────────────────────────────────────────────
+
+# GCP region for all regional resources.
+# Changing this after the initial apply will force recreation of most resources.
+region = "europe-west1"
+
+# Short prefix used in the name of every resource created by this environment.
+# Stick to lowercase letters, digits, and hyphens; max 20 chars.
+name = "gke-labs"
+
+# Environment tag.  Must be one of: dev, staging, prod.
+env = "dev"
+
+# Common labels applied to every GCP resource.
+# Add your own cost-centre, team, or ticket labels here.
+labels = {
+  env        = "dev"
+  managed-by = "terraform"
+  lab        = "gke-labs"
+}

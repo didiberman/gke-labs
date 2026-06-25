@@ -1,0 +1,315 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CD — Staging Environment
+#
+# Manual-only deployment to the `staging` GKE cluster.  The `staging` GitHub
+# Environment is configured with required reviewers, so this workflow PAUSES
+# at the "deploy" job until an authorised reviewer clicks Approve in the
+# GitHub UI.
+#
+# Workflow structure:
+#   1. deploy          – Helm upgrade with staging values + rollout wait
+#   2. integration-test – post-deploy integration/smoke-test suite
+#
+# How to trigger:
+#   GitHub → Actions → "CD — Staging" → Run workflow → enter image_tag
+#
+# Required GitHub repository variables:
+#   vars.GCP_PROJECT_ID
+#
+# Required GitHub repository secrets:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER
+#   secrets.GCP_SERVICE_ACCOUNT
+#
+# Required GitHub Environments setup (one-time):
+#   Settings → Environments → staging → Required reviewers (add team/users)
+# ──────────────────────────────────────────────────────────────────────────────
+name: "CD — Staging"
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Exact image tag to deploy (e.g. sha-abc1234)"
+        required: true
+        # No default — staging deployments must be deliberate.
+      skip_integration_tests:
+        description: "Skip integration tests (emergency deploys only)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# Only one staging deployment at a time.
+concurrency:
+  group: cd-staging
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT_ID:                ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION:                    europe-west1
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT:           ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+  GKE_CLUSTER:   gke-labs-staging
+  GKE_LOCATION:  europe-west1
+
+  PAYMENTS_RELEASE: payments-api
+  PAYMENTS_NS:      payments
+  OBS_RELEASE:      observability
+  OBS_NS:           observability
+
+  IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Job 1 — Deploy
+# The `environment: staging` line is what triggers the GitHub approval gate.
+# ──────────────────────────────────────────────────────────────────────────────
+jobs:
+  deploy:
+    name: "Deploy → staging  [requires approval]"
+    runs-on: ubuntu-latest
+    # ⚠️  This is the approval gate.  GitHub will pause here and send a
+    # notification to the required reviewers defined on the `staging` Environment.
+    environment:
+      name: staging
+      url:  https://payments-api.staging.example.com   # update with your URL
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Authenticate to GCP ───────────────────────────────────────────────
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      # ── 3. Get GKE credentials ───────────────────────────────────────────────
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location:     ${{ env.GKE_LOCATION }}
+          project_id:   ${{ env.GCP_PROJECT_ID }}
+
+      # ── 4. Install Helm ──────────────────────────────────────────────────────
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.15.2"
+
+      # ── 5. Deploy payments-api ───────────────────────────────────────────────
+      # Staging uses its own values-staging.yaml which points to staging
+      # resource sizes, replica counts, and feature flags.
+      - name: Helm deploy — payments-api (staging)
+        run: |
+          helm upgrade "$PAYMENTS_RELEASE" helm/payments-api \
+            --install \
+            --namespace "$PAYMENTS_NS" \
+            --create-namespace \
+            --values helm/payments-api/values.yaml \
+            --values helm/payments-api/values-staging.yaml \
+            --set image.tag="${IMAGE_TAG}" \
+            --set image.repository="europe-west1-docker.pkg.dev/${GCP_PROJECT_ID}/gke-labs/payments-api" \
+            --atomic \
+            --timeout 8m \
+            --wait
+
+      # ── 6. Deploy observability stack ────────────────────────────────────────
+      - name: Helm deploy — observability (staging)
+        run: |
+          helm upgrade "$OBS_RELEASE" helm/observability \
+            --install \
+            --namespace "$OBS_NS" \
+            --create-namespace \
+            --values helm/observability/values.yaml \
+            --values helm/observability/values-staging.yaml \
+            --atomic \
+            --timeout 10m \
+            --wait
+
+      # ── 7. Wait for rollout ──────────────────────────────────────────────────
+      - name: Wait for payments-api rollout
+        run: |
+          echo "⏳ Waiting for rollout in staging..."
+          kubectl rollout status deployment/payments-api \
+            --namespace "$PAYMENTS_NS" \
+            --timeout=8m
+          echo "✅ Rollout complete."
+
+      # ── 8. Basic connectivity smoke test ─────────────────────────────────────
+      - name: Run connectivity smoke test
+        id: smoke-test
+        run: |
+          echo "🔍 Running connectivity smoke test..."
+          kubectl run smoke-test-staging \
+            --image=curlimages/curl:latest \
+            --rm \
+            --attach \
+            --restart=Never \
+            --namespace "$PAYMENTS_NS" \
+            --timeout=60s \
+            -- curl -sf \
+                 --max-time 30 \
+                 "http://payments-api.${PAYMENTS_NS}.svc.cluster.local/get"
+          echo "✅ Connectivity smoke test passed."
+        continue-on-error: true
+
+      # ── 9. Rollback on smoke-test failure ────────────────────────────────────
+      - name: Rollback payments-api (smoke test failed)
+        if: steps.smoke-test.outcome == 'failure'
+        run: |
+          echo "❌ Smoke test failed — rolling back payments-api in staging..."
+          helm rollback "$PAYMENTS_RELEASE" 0 \
+            --namespace "$PAYMENTS_NS" \
+            --wait \
+            --timeout 3m
+          echo "⏪ Rollback complete."
+
+      - name: Fail job after rollback
+        if: steps.smoke-test.outcome == 'failure'
+        run: |
+          echo "::error::Smoke test failed — payments-api was rolled back in staging."
+          exit 1
+
+      # ── 10. Deployment summary ───────────────────────────────────────────────
+      - name: Print deployment summary
+        if: steps.smoke-test.outcome == 'success'
+        run: |
+          echo "## ✅ Staging Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field         | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment   | staging |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image tag     | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Approved by   | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          kubectl get pods -n "$PAYMENTS_NS" -o wide >> "$GITHUB_STEP_SUMMARY" || true
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Job 2 — Integration Tests
+  #
+  # Runs after the deploy job succeeds.  Uses a dedicated test namespace so
+  # tests are isolated from the application namespace.
+  # ──────────────────────────────────────────────────────────────────────────
+  integration-test:
+    name: "Integration Tests → staging"
+    runs-on: ubuntu-latest
+    needs: deploy
+    # Allow skipping for emergency deploys.
+    if: github.event.inputs.skip_integration_tests != 'true'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location:     ${{ env.GKE_LOCATION }}
+          project_id:   ${{ env.GCP_PROJECT_ID }}
+
+      # ── Create dedicated test namespace ──────────────────────────────────────
+      - name: Ensure integration-test namespace exists
+        run: |
+          kubectl create namespace integration-tests --dry-run=client -o yaml \
+            | kubectl apply -f -
+
+      # ── Test: GET /get returns 200 ────────────────────────────────────────────
+      - name: "Integration test: GET /get → 200"
+        run: |
+          echo "▶ Test: GET /get returns HTTP 200"
+          kubectl run itest-get \
+            --image=curlimages/curl:latest \
+            --rm \
+            --attach \
+            --restart=Never \
+            --namespace integration-tests \
+            --timeout=60s \
+            -- curl -sf --max-time 30 \
+                 "http://payments-api.payments.svc.cluster.local/get" \
+            && echo "✅ PASS" || (echo "❌ FAIL" && exit 1)
+
+      # ── Test: POST /post echo ─────────────────────────────────────────────────
+      - name: "Integration test: POST /post → 200"
+        run: |
+          echo "▶ Test: POST /post returns HTTP 200"
+          kubectl run itest-post \
+            --image=curlimages/curl:latest \
+            --rm \
+            --attach \
+            --restart=Never \
+            --namespace integration-tests \
+            --timeout=60s \
+            -- curl -sf --max-time 30 \
+                 -X POST \
+                 -H "Content-Type: application/json" \
+                 -d '{"test": "integration"}' \
+                 "http://payments-api.payments.svc.cluster.local/post" \
+            && echo "✅ PASS" || (echo "❌ FAIL" && exit 1)
+
+      # ── Test: /status/200 ─────────────────────────────────────────────────────
+      - name: "Integration test: /status/200 → 200"
+        run: |
+          echo "▶ Test: /status/200 health probe"
+          kubectl run itest-status \
+            --image=curlimages/curl:latest \
+            --rm \
+            --attach \
+            --restart=Never \
+            --namespace integration-tests \
+            --timeout=60s \
+            -- curl -sf --max-time 30 \
+                 "http://payments-api.payments.svc.cluster.local/status/200" \
+            && echo "✅ PASS" || (echo "❌ FAIL" && exit 1)
+
+      # ── Test: /headers ─────────────────────────────────────────────────────────
+      - name: "Integration test: /headers returns JSON with headers"
+        run: |
+          echo "▶ Test: /headers endpoint returns JSON"
+          kubectl run itest-headers \
+            --image=curlimages/curl:latest \
+            --rm \
+            --attach \
+            --restart=Never \
+            --namespace integration-tests \
+            --timeout=60s \
+            -- curl -sf --max-time 30 \
+                 "http://payments-api.payments.svc.cluster.local/headers" \
+            && echo "✅ PASS" || (echo "❌ FAIL" && exit 1)
+
+      # ── Summary ───────────────────────────────────────────────────────────────
+      - name: Integration test summary
+        if: always()
+        run: |
+          echo "## Integration Test Results — staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: \`${{ env.IMAGE_TAG }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Triggered by: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Cleanup test namespace ────────────────────────────────────────────────
+      - name: Cleanup integration-test namespace
+        if: always()
+        run: |
+          kubectl delete namespace integration-tests \
+            --ignore-not-found=true \
+            --timeout=60s || true

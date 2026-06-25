@@ -1,0 +1,439 @@
+# ==============================================================================
+# observability/values.yaml
+#
+# Default values for the full observability umbrella chart.
+# These are production-leaning defaults that can be overridden by environment
+# specific files (values.dev.yaml, values.prod.yaml, etc.).
+#
+# Sub-chart keys must match the dependency `name` in Chart.yaml exactly.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# kube-prometheus-stack
+# Docs: https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack
+# ------------------------------------------------------------------------------
+kube-prometheus-stack:
+  enabled: true
+
+  # ── Default alert/recording rules ──────────────────────────────────────────
+  defaultRules:
+    create: true
+    rules:
+      alertmanager: true
+      etcd: true
+      configReloaders: true
+      general: true
+      k8s: true
+      kubeApiserverAvailability: true
+      kubeApiserverBurnrate: true
+      kubeApiserverHistogram: true
+      kubeApiserverSlos: true
+      kubeControllerManager: true
+      kubelet: true
+      kubeProxy: true
+      kubePrometheusGeneral: true
+      kubePrometheusNodeRecording: true
+      kubernetesApps: true
+      kubernetesResources: true
+      kubernetesStorage: true
+      kubernetesSystem: true
+      kubeSchedulerAlerting: true
+      kubeSchedulerRecording: true
+      kubeStateMetrics: true
+      network: true
+      node: true
+      nodeExporterAlerting: true
+      nodeExporterRecording: true
+      prometheus: true
+      prometheusOperator: true
+
+  # ── Prometheus Operator ─────────────────────────────────────────────────────
+  prometheusOperator:
+    enabled: true
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+  # ── Prometheus ──────────────────────────────────────────────────────────────
+  prometheus:
+    enabled: true
+    prometheusSpec:
+      # How long to retain raw metrics data on disk
+      retention: 15d
+
+      # Scrape interval – align with your SLO cadence
+      scrapeInterval: "30s"
+      evaluationInterval: "30s"
+
+      # Allow Prometheus to discover ServiceMonitors / PodMonitors across ALL
+      # namespaces (not just the one it lives in). Required for multi-namespace
+      # workloads such as payments-api.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+
+      # Resource limits (production-leaning; reduce in values.dev.yaml)
+      resources:
+        requests:
+          cpu: 500m
+          memory: 2Gi
+        limits:
+          cpu: 2000m
+          memory: 4Gi
+
+      # Persistent storage for Prometheus TSDB
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: standard   # Override to 'premium-rwo' for prod
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 20Gi
+
+      # Additional scrape configs can reference external services
+      additionalScrapeConfigs: []
+
+  # ── Alertmanager ────────────────────────────────────────────────────────────
+  alertmanager:
+    enabled: true
+    alertmanagerSpec:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 200m
+          memory: 128Mi
+      storage:
+        volumeClaimTemplate:
+          spec:
+            storageClassName: standard
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 5Gi
+    config:
+      global:
+        resolve_timeout: 5m
+      route:
+        group_by: ['namespace', 'alertname']
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 12h
+        receiver: 'null'
+        routes:
+          - matchers:
+              - alertname =~ "InfoInhibitor|Watchdog"
+            receiver: 'null'
+      receivers:
+        - name: 'null'
+      templates: []
+
+  # ── Grafana ─────────────────────────────────────────────────────────────────
+  grafana:
+    enabled: true
+
+    # !! Change this via a Secret/external values in production !!
+    adminPassword: prom-operator
+
+    # Persist dashboards / datasource state across pod restarts
+    persistence:
+      enabled: true
+      storageClassName: standard
+      size: 10Gi
+      accessModes:
+        - ReadWriteOnce
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # ── grafana.ini ────────────────────────────────────────────────────────────
+    grafana.ini:
+      server:
+        root_url: "%(protocol)s://%(domain)s:%(http_port)s/"
+      auth.anonymous:
+        enabled: false
+      unified_alerting:
+        # Unified Alerting (GA in Grafana 9+) replaces legacy alerting.
+        enabled: true
+      feature_toggles:
+        # traceqlEditor: enables the TraceQL query editor for Tempo.
+        enable: "traceqlEditor"
+      log:
+        mode: console
+        level: info
+
+    # ── Additional data sources (Loki + Tempo) ─────────────────────────────────
+    # These companion services are deployed by this same umbrella chart.
+    # Service names follow the pattern: <release-name>-<chart-name>.
+    # The `observability-` prefix matches a typical `helm install observability .`
+    additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: loki
+        url: http://observability-loki-gateway
+        access: proxy
+        isDefault: false
+        jsonData:
+          maxLines: 1000
+          # Link Loki traces to Tempo
+          derivedFields:
+            - datasourceUid: tempo
+              matcherRegex: '"traceID":"(\w+)"'
+              name: TraceID
+              url: "$${__value.raw}"
+
+      - name: Tempo
+        type: tempo
+        uid: tempo
+        url: http://observability-tempo:3100
+        access: proxy
+        isDefault: false
+        jsonData:
+          httpMethod: GET
+          tracesToLogsV2:
+            datasourceUid: loki
+            spanStartTimeShift: '-1h'
+            spanEndTimeShift: '1h'
+            filterByTraceID: true
+            filterBySpanID: false
+          serviceMap:
+            datasourceUid: prometheus
+          nodeGraph:
+            enabled: true
+
+    # ── Dashboard Providers ────────────────────────────────────────────────────
+    # Tells Grafana where to load dashboards from ConfigMaps.
+    # The sidecar watches for ConfigMaps labelled `grafana_dashboard=1`.
+    dashboardProviders:
+      dashboardproviders.yaml:
+        apiVersion: 1
+        providers:
+          - name: default
+            orgId: 1
+            folder: ''
+            type: file
+            disableDeletion: false
+            editable: true
+            options:
+              path: /var/lib/grafana/dashboards/default
+          - name: custom
+            orgId: 1
+            folder: 'GKE Labs'
+            type: file
+            disableDeletion: false
+            editable: true
+            options:
+              path: /var/lib/grafana/dashboards/custom
+
+    # Enable the sidecar so ConfigMap-based dashboards are auto-discovered
+    sidecar:
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+        labelValue: "1"
+        folder: /var/lib/grafana/dashboards/custom
+        searchNamespace: ALL
+      datasources:
+        enabled: true
+        label: grafana_datasource
+        labelValue: "1"
+        searchNamespace: ALL
+
+  # ── kube-state-metrics ──────────────────────────────────────────────────────
+  kubeStateMetrics:
+    enabled: true
+
+  kube-state-metrics:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi
+
+  # ── prometheus-node-exporter ────────────────────────────────────────────────
+  nodeExporter:
+    enabled: true
+
+  prometheus-node-exporter:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+  # ── Component monitors (GKE managed control-plane — disable these) ──────────
+  kubeEtcd:
+    enabled: false   # Not directly accessible on GKE
+  kubeControllerManager:
+    enabled: false   # Managed by GKE
+  kubeScheduler:
+    enabled: false   # Managed by GKE
+  kubeProxy:
+    enabled: false   # Not accessible on GKE Autopilot; set true for Standard
+
+# ------------------------------------------------------------------------------
+# Loki
+# Docs: https://github.com/grafana/loki/tree/main/production/helm/loki
+# ------------------------------------------------------------------------------
+loki:
+  enabled: true
+
+  # SingleBinary mode: runs the entire Loki stack as a single replica.
+  # Suitable for dev/lab. Switch to `SimpleScalable` or `Distributed` for prod.
+  deploymentMode: SingleBinary
+
+  loki:
+    # Disable multi-tenancy for simplicity in a lab environment.
+    auth_enabled: false
+
+    # CommonConfig sets defaults for all Loki components.
+    commonConfig:
+      replication_factor: 1
+
+    # Storage backend — filesystem (simple, no object-store dependency).
+    # For production, switch to `gcs` or `s3` with a GCS bucket.
+    storage:
+      type: filesystem
+
+    # Schema config controls how Loki indexes/stores chunks.
+    schemaConfig:
+      configs:
+        - from: "2024-01-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: loki_index_
+            period: 24h
+
+    # Limit configuration
+    limits_config:
+      retention_period: 744h    # 31 days
+      ingestion_rate_mb: 16
+      ingestion_burst_size_mb: 32
+      max_query_series: 100000
+
+  # SingleBinary component config
+  singleBinary:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    persistence:
+      enabled: true
+      storageClass: standard
+      size: 20Gi
+
+  # Disable components not needed in SingleBinary mode
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  backend:
+    replicas: 0
+
+  # Loki Gateway (nginx reverse proxy in front of Loki)
+  gateway:
+    enabled: true
+    replicas: 1
+    resources:
+      requests:
+        cpu: 20m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+  # Disable Promtail (we may add it separately, or use OTel collector)
+  test:
+    enabled: false
+
+  lokiCanary:
+    enabled: false
+
+# ------------------------------------------------------------------------------
+# Tempo
+# Docs: https://github.com/grafana/helm-charts/tree/main/charts/tempo
+# ------------------------------------------------------------------------------
+tempo:
+  enabled: true
+
+  tempo:
+    # Image
+    repository: grafana/tempo
+    tag: ""    # Empty = use chart default
+    pullPolicy: IfNotPresent
+
+    # ── Trace receivers ────────────────────────────────────────────────────────
+    # OTLP (gRPC + HTTP) is the primary ingestion protocol.
+    # Zipkin is added for services not yet migrated to OTLP.
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: "0.0.0.0:4317"
+          http:
+            endpoint: "0.0.0.0:4318"
+      zipkin:
+        endpoint: "0.0.0.0:9411"
+
+    # ── Trace storage ──────────────────────────────────────────────────────────
+    # Local filesystem backend — simple for lab use.
+    # For production, use `gcs` with a dedicated GCS bucket.
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+        wal:
+          path: /var/tempo/wal
+
+    # Retention for trace data
+    retention: 720h   # 30 days
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+  # Persistent volume for trace data
+  persistence:
+    enabled: true
+    storageClassName: standard
+    size: 10Gi
+    accessModes:
+      - ReadWriteOnce
+
+  # Service ports (must expose 4317/4318 for OTLP receivers)
+  service:
+    type: ClusterIP
+    port: 3100
+    annotations: {}
+
+  serviceMonitor:
+    enabled: true
+    interval: 30s

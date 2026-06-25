@@ -1,0 +1,22 @@
+{{/*
+configmap-cloudsql.yaml
+ConfigMap consumed by the Cloud SQL Auth Proxy sidecar.
+The proxy reads CLOUD_SQL_INSTANCE from this ConfigMap to determine which
+Cloud SQL instance to connect to, keeping the connection string out of the
+container image and Pod spec.
+
+Reference in values.yaml:
+  cloudSql:
+    instanceConnectionName: "PROJECT:REGION:INSTANCE"
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-cloudsql-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "temporal-wrapper.labels" . | nindent 4 }}
+data:
+  # Format: PROJECT_ID:REGION:INSTANCE_NAME
+  # Example: gke-labs:europe-west1:gke-lab-postgres-dev
+  instance_connection_name: {{ required "cloudSql.instanceConnectionName is required" .Values.cloudSql.instanceConnectionName | quote }}

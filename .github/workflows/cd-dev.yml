@@ -1,0 +1,204 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CD — Dev Environment
+#
+# Deploys to the `dev` GKE cluster whenever code lands on `main`, or on
+# demand via workflow_dispatch (useful for deploying a specific image tag
+# without waiting for a code change).
+#
+# Deployment strategy:
+#   • Helm upgrade --install (idempotent: works for first deploy and upgrades)
+#   • Waits for the rollout to complete before running a smoke test
+#   • Automatically rolls back via `helm rollback` if the smoke test fails
+#
+# Required GitHub repository variables:
+#   vars.GCP_PROJECT_ID
+#
+# Required GitHub repository secrets:
+#   secrets.GCP_WORKLOAD_IDENTITY_PROVIDER
+#   secrets.GCP_SERVICE_ACCOUNT
+# ──────────────────────────────────────────────────────────────────────────────
+name: "CD — Dev"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (e.g. sha-abc1234, latest)"
+        required: false
+        default: "latest"
+
+# Only allow one deployment to dev at a time to avoid race conditions.
+concurrency:
+  group: cd-dev
+  cancel-in-progress: false   # let the current deploy finish; queue the next
+
+env:
+  GCP_PROJECT_ID:                ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION:                    europe-west1
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT:           ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+  # Cluster-specific settings for dev.
+  GKE_CLUSTER:   gke-labs-dev
+  GKE_LOCATION:  europe-west1   # regional cluster; use zone for zonal
+
+  # Helm release settings.
+  PAYMENTS_RELEASE:  payments-api
+  PAYMENTS_NS:       payments
+  OBS_RELEASE:       observability
+  OBS_NS:            observability
+
+  # Resolve the image tag: prefer the manual dispatch input; fall back to the
+  # short commit SHA for pushes triggered automatically.
+  IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
+
+jobs:
+  deploy:
+    name: "Deploy → dev"
+    runs-on: ubuntu-latest
+    # Map to the GitHub Environment named "dev" so deployment tracking,
+    # environment-scoped secrets, and the deployment URL all work correctly.
+    environment:
+      name: dev
+      url:  https://payments-api.dev.example.com   # update with your actual URL
+
+    permissions:
+      contents:  read
+      id-token:  write   # required for Workload Identity Federation OIDC
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Authenticate to GCP ───────────────────────────────────────────────
+      # Keyless authentication via Workload Identity Federation.
+      # No service-account JSON keys are stored anywhere.
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      # ── 3. Get GKE credentials ───────────────────────────────────────────────
+      # Writes a kubeconfig entry for the dev cluster so subsequent kubectl
+      # and helm commands target it automatically.
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location:     ${{ env.GKE_LOCATION }}
+          project_id:   ${{ env.GCP_PROJECT_ID }}
+
+      # ── 4. Install Helm ──────────────────────────────────────────────────────
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.15.2"
+
+      # ── 5. Deploy payments-api ───────────────────────────────────────────────
+      # `--install`    : creates the release if it doesn't exist yet
+      # `--atomic`     : rolls back automatically on timeout/failure
+      # `--timeout`    : generous timeout for slow node cold-starts in dev
+      # `--set`        : override the image tag without touching the values file
+      - name: Helm deploy — payments-api
+        run: |
+          helm upgrade "$PAYMENTS_RELEASE" helm/payments-api \
+            --install \
+            --namespace "$PAYMENTS_NS" \
+            --create-namespace \
+            --values helm/payments-api/values.yaml \
+            --values helm/payments-api/values-dev.yaml \
+            --set image.tag="${IMAGE_TAG}" \
+            --set image.repository="europe-west1-docker.pkg.dev/${GCP_PROJECT_ID}/gke-labs/payments-api" \
+            --atomic \
+            --timeout 5m \
+            --wait
+
+      # ── 6. Deploy observability stack ────────────────────────────────────────
+      - name: Helm deploy — observability
+        run: |
+          helm upgrade "$OBS_RELEASE" helm/observability \
+            --install \
+            --namespace "$OBS_NS" \
+            --create-namespace \
+            --values helm/observability/values.yaml \
+            --values helm/observability/values-dev.yaml \
+            --atomic \
+            --timeout 10m \
+            --wait
+
+      # ── 7. Wait for rollout ──────────────────────────────────────────────────
+      # `helm upgrade --atomic` already waits, but an explicit rollout status
+      # check gives us a clear log entry and a second verification point.
+      - name: Wait for payments-api rollout
+        run: |
+          echo "⏳ Waiting for payments-api Deployment to finish rolling out..."
+          kubectl rollout status deployment/payments-api \
+            --namespace "$PAYMENTS_NS" \
+            --timeout=5m
+          echo "✅ Rollout complete."
+
+      # ── 8. Smoke test ────────────────────────────────────────────────────────
+      # Spin up a disposable curl pod inside the cluster to verify the service
+      # is reachable on its ClusterIP DNS name.
+      # `--rm`             : pod is deleted automatically after exit
+      # `-it`              : attach stdin/stdout (needed for --restart=Never)
+      # `--restart=Never`  : run as a one-shot Pod, not a Deployment
+      # `-f`               : curl fails with a non-zero exit code on HTTP errors
+      - name: Run smoke test
+        id: smoke-test
+        run: |
+          echo "🔍 Running smoke test against payments-api..."
+          kubectl run smoke-test \
+            --image=curlimages/curl:latest \
+            --rm \
+            --attach \
+            --restart=Never \
+            --namespace "$PAYMENTS_NS" \
+            --timeout=60s \
+            -- curl -sf \
+                 --max-time 30 \
+                 "http://payments-api.${PAYMENTS_NS}.svc.cluster.local/get"
+          echo "✅ Smoke test passed."
+        # Don't abort the workflow immediately on failure — we need the
+        # rollback step to run first.
+        continue-on-error: true
+
+      # ── 9. Rollback on smoke-test failure ────────────────────────────────────
+      # `helm rollback` reverts to the previous revision of the release.
+      # Revision 0 means "one step back from the current" which is what we want.
+      - name: Rollback payments-api (smoke test failed)
+        if: steps.smoke-test.outcome == 'failure'
+        run: |
+          echo "❌ Smoke test failed — rolling back payments-api..."
+          helm rollback "$PAYMENTS_RELEASE" 0 \
+            --namespace "$PAYMENTS_NS" \
+            --wait \
+            --timeout 3m
+          echo "⏪ Rollback complete."
+
+      # After rolling back, fail the job so the GitHub deployment is marked red.
+      - name: Fail job after rollback
+        if: steps.smoke-test.outcome == 'failure'
+        run: |
+          echo "::error::Smoke test failed and payments-api was rolled back."
+          exit 1
+
+      # ── 10. Deployment summary ───────────────────────────────────────────────
+      - name: Print deployment summary
+        if: steps.smoke-test.outcome == 'success'
+        run: |
+          echo "## ✅ Dev Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field         | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Environment   | dev   |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image tag     | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Commit        | \`${GITHUB_SHA:0:7}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Triggered by  | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          kubectl get pods -n "$PAYMENTS_NS" -o wide >> "$GITHUB_STEP_SUMMARY" || true

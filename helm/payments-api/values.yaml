@@ -1,0 +1,216 @@
+# ------------------------------------------------------------------------------
+# payments-api — Default Helm Values
+# Override per-environment with values.<env>.yaml files.
+# ------------------------------------------------------------------------------
+
+# Number of pod replicas (overridden by HPA when autoscaling.enabled=true)
+replicaCount: 2
+
+# ---------------------------------------------------------------------------
+# Container image
+# ---------------------------------------------------------------------------
+image:
+  # httpbin is used as a demo stand-in; swap for the real registry path per env.
+  repository: httpbin/httpbin
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Name overrides
+# ---------------------------------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+
+# ---------------------------------------------------------------------------
+# Service Account
+# ---------------------------------------------------------------------------
+serviceAccount:
+  # Specifies whether a ServiceAccount should be created
+  create: true
+  # The name of the ServiceAccount to use. If not set and create=true,
+  # the fullname template is used.
+  name: payments-api
+  # Annotations added to the ServiceAccount — used for Workload Identity
+  # e.g. iam.gke.io/gcp-service-account: <GSA>@<PROJECT>.iam.gserviceaccount.com
+  annotations: {}
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+
+# ---------------------------------------------------------------------------
+# Resource requests and limits
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# ---------------------------------------------------------------------------
+# Horizontal Pod Autoscaler
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# ---------------------------------------------------------------------------
+# Pod Disruption Budget
+# ---------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  # minAvailable and maxUnavailable are mutually exclusive — set one only.
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# ---------------------------------------------------------------------------
+# Network Policy
+# ---------------------------------------------------------------------------
+networkPolicy:
+  # When enabled, denies all ingress except from ingress-nginx and monitoring
+  # namespaces. All egress is allowed (Cloud SQL Proxy, Redis, Secret Manager).
+  enabled: true
+
+# ---------------------------------------------------------------------------
+# Scheduling
+# ---------------------------------------------------------------------------
+nodeSelector:
+  role: application
+
+tolerations: []
+
+# Prefer spreading pods across different nodes to improve availability.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: payments-api
+          topologyKey: kubernetes.io/hostname
+
+# Spread pods across availability zones for zone-level resilience.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: payments-api
+
+# ---------------------------------------------------------------------------
+# Environment variables injected into the main container
+# ---------------------------------------------------------------------------
+# Each entry is a standard Kubernetes EnvVar object, e.g.:
+#   - name: LOG_LEVEL
+#     value: info
+#   - name: DB_PASSWORD
+#     valueFrom:
+#       secretKeyRef:
+#         name: my-secret
+#         key: password
+env: []
+
+# ---------------------------------------------------------------------------
+# External Secrets Operator
+# ---------------------------------------------------------------------------
+externalSecrets:
+  # Enable per-environment to sync secrets from GCP Secret Manager via ESO.
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# Cloud SQL Auth Proxy sidecar
+# ---------------------------------------------------------------------------
+cloudsqlProxy:
+  enabled: false
+  # Full connection name: <project>:<region>:<instance>
+  connectionName: ""
+  image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ---------------------------------------------------------------------------
+# Probes
+# ---------------------------------------------------------------------------
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  failureThreshold: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+
+# ---------------------------------------------------------------------------
+# Ingress (disabled by default — use GKE Gateway or external LB per env)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+# ---------------------------------------------------------------------------
+# Pod-level annotations
+# ---------------------------------------------------------------------------
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "80"
+
+# ---------------------------------------------------------------------------
+# Security context
+# Applied at both pod and container level for defence-in-depth.
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault

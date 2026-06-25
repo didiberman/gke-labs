@@ -1,0 +1,103 @@
+# =============================================================================
+# tempo.yaml — Grafana Tempo configuration (local lab)
+# =============================================================================
+# Tempo stores traces on the local filesystem under /tmp/tempo (mapped to the
+# `tempo_data` Docker volume for persistence between restarts).
+#
+# Receivers enabled:
+#   • OTLP gRPC  — 0.0.0.0:4317
+#   • OTLP HTTP  — 0.0.0.0:4318
+#   • Zipkin     — 0.0.0.0:9411
+#
+# Query frontend:
+#   • HTTP API   — 0.0.0.0:3200
+# =============================================================================
+
+# ── Server ─────────────────────────────────────────────────────────────────────
+server:
+  http_listen_port: 3200
+  log_level:        info
+  log_format:       logfmt   # switch to json in prod
+
+# ── Query frontend ─────────────────────────────────────────────────────────────
+query_frontend:
+  search:
+    duration_slo:  5s
+    throughput_bytes_slo: 1.073741824e+09   # 1 GiB
+  trace_by_id:
+    duration_slo: 5s
+
+# ── Distributor — receive traces from instrumented services ────────────────────
+distributor:
+  receivers:
+    # OTLP (OpenTelemetry Protocol) — preferred for new services
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+    # Zipkin — for services instrumented with Zipkin (e.g. Spring Sleuth)
+    zipkin:
+      endpoint: "0.0.0.0:9411"
+
+# ── Ingester — batches spans before flushing to the backend ───────────────────
+ingester:
+  max_block_duration: 5m      # flush to backend every 5 minutes
+  trace_idle_period:  10s     # close a trace after 10 s of inactivity
+  max_block_bytes:    1073741824  # 1 GiB max block size before forced flush
+
+# ── Compactor — merges and ages out blocks ────────────────────────────────────
+compactor:
+  compaction:
+    # Compact blocks smaller than this into larger ones.
+    block_retention: 24h   # keep traces for 24 hours in local dev
+    compacted_block_retention: 1h
+
+# ── Storage — local filesystem (Docker volume) ────────────────────────────────
+storage:
+  trace:
+    backend: local
+
+    local:
+      path: /tmp/tempo/blocks
+
+    # Write-ahead log: prevents data loss on restart
+    wal:
+      path: /tmp/tempo/wal
+
+    # Cache (in-memory) for frequently accessed block index entries
+    pool:
+      max_workers:  100
+      queue_depth: 10000
+
+# ── Metrics generator (optional — produces RED metrics from traces) ────────────
+# Uncomment to enable. Requires Prometheus remote-write endpoint.
+#
+# metrics_generator:
+#   registry:
+#     external_labels:
+#       source: tempo
+#       cluster: docker-compose
+#   storage:
+#     path: /tmp/tempo/generator/wal
+#     remote_write:
+#       - url: http://prometheus:9090/api/v1/write
+#         send_exemplars: true
+
+# ── Overrides — per-tenant limits (single tenant in local dev) ─────────────────
+overrides:
+  defaults:
+    ingestion:
+      rate_limit_bytes:  15000000   # 15 MB/s ingestion rate limit
+      burst_size_bytes:  20000000   # 20 MB burst
+      max_traces_per_user: 10000
+
+    read:
+      max_bytes_per_trace:  5000000  # 5 MB max trace size returned
+
+    # Generate metrics from spans (disabled unless metrics_generator is on)
+    metrics_generator:
+      processors:         []         # enable [service-graphs, span-metrics] if desired
+      max_active_series:  0

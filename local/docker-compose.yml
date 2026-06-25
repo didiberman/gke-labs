@@ -1,0 +1,245 @@
+---
+# =============================================================================
+# docker-compose.yml — GKE Labs local development stack
+# =============================================================================
+# Runs a full observability + workflow stack locally — zero GCP cost.
+#
+# Services:
+#   postgres        → PostgreSQL 15 (state store for Temporal & app workloads)
+#   redis           → Redis 7 (caching / queue experiments)
+#   temporal        → Temporal server (workflow orchestration)
+#   temporal-ui     → Temporal Web UI
+#   prometheus      → Metrics scraping & alerting
+#   grafana         → Dashboards (Prometheus + Loki + Tempo pre-wired)
+#   loki            → Log aggregation
+#   tempo           → Distributed tracing (OTLP/Zipkin receivers)
+#   httpbin         → Echo / HTTP testing service
+#
+# Quick start:
+#   docker compose up -d
+#   open http://localhost:3000  # Grafana  (admin / admin)
+#   open http://localhost:8080  # Temporal UI
+#   open http://localhost:9090  # Prometheus
+#   open http://localhost:8000  # httpbin
+#
+# Tear down (keeps volumes):
+#   docker compose down
+# Tear down and wipe data:
+#   docker compose down -v
+# =============================================================================
+
+version: "3.8"
+
+# ── Shared network ─────────────────────────────────────────────────────────────
+networks:
+  lab:
+    driver: bridge
+
+# ── Named volumes ──────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  grafana_data:
+  tempo_data:
+
+# ── Reusable health-check defaults ────────────────────────────────────────────
+x-healthcheck-defaults: &hc-defaults
+  interval: 10s
+  timeout:  5s
+  retries:  5
+
+# ==============================================================================
+services:
+
+  # ── PostgreSQL 15 ────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: lab-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     payments
+      POSTGRES_PASSWORD: localpassword
+      POSTGRES_DB:       payments
+      # Create additional databases on first start via initdb scripts.
+      # Temporal needs its own databases — handled by temporalio/auto-setup.
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+
+  # ── Redis 7 ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: lab-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+        --requirepass localpassword
+        --save 60 1
+        --loglevel notice
+    ports:
+      - "6379:6379"
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "redis-cli", "-a", "localpassword", "ping"]
+
+  # ── Temporal server (auto-setup) ─────────────────────────────────────────────
+  # temporalio/auto-setup automatically creates and migrates the Temporal
+  # schema inside postgres before starting the server. It uses the `payments`
+  # postgres user/password for simplicity in local dev (no separate user needed).
+  temporal:
+    image: temporalio/auto-setup:1.24
+    container_name: lab-temporal
+    restart: unless-stopped
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=payments
+      - POSTGRES_PWD=localpassword
+      - POSTGRES_SEEDS=postgres
+      # Use a dedicated DB for Temporal to keep it separate from the app DB.
+      - DBNAME=temporal
+      - VISIBILITY_DBNAME=temporal_visibility
+      # Logging
+      - LOG_LEVEL=info
+      # Temporal server metrics endpoint
+      - PROMETHEUS_ENDPOINT=0.0.0.0:9090
+    ports:
+      - "7233:7233"   # gRPC frontend
+      - "9090:9090"   # Temporal Prometheus metrics
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "temporal", "workflow", "list", "--address", "localhost:7233", "--namespace", "default"]
+      # tctl / temporal CLI is bundled in the auto-setup image.
+      start_period: 30s
+
+  # ── Temporal Web UI ───────────────────────────────────────────────────────────
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    container_name: lab-temporal-ui
+    restart: unless-stopped
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+      - TEMPORAL_UI_PORT=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      temporal:
+        condition: service_started
+    networks:
+      - lab
+
+  # ── Prometheus ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: lab-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"          # allow /-/reload via HTTP POST
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+
+  # ── Grafana ───────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: lab-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Allow embedding in iframes (useful for lab dashboards)
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      # Pre-install useful plugins
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-clock-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+
+  # ── Loki (log aggregation) ────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: lab-loki
+    restart: unless-stopped
+    # Use the built-in local config — sufficient for lab workloads.
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"   # HTTP API + push endpoint
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3100/ready"]
+
+  # ── Tempo (distributed tracing) ───────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.4.2
+    container_name: lab-tempo
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/tmp/tempo
+    ports:
+      - "3200:3200"   # Tempo HTTP query frontend
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "9411:9411"   # Zipkin receiver
+    networks:
+      - lab
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3200/ready"]
+
+  # ── httpbin (HTTP echo / testing) ─────────────────────────────────────────────
+  # Useful for testing ingress rules, retries, timeouts, circuit breakers.
+  httpbin:
+    image: kennethreitz/httpbin
+    container_name: lab-httpbin
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    networks:
+      - lab
+    labels:
+      prometheus.io/scrape: "true"
+      prometheus.io/port:   "80"
+      prometheus.io/path:   "/metrics"
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/get"]

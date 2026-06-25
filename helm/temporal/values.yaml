@@ -1,0 +1,231 @@
+# =============================================================================
+# values.yaml — Temporal wrapper chart
+# =============================================================================
+# All keys under `temporal:` are passed through to the upstream
+# temporalio/temporal Helm chart (dependency alias = chart name).
+# Reference: https://github.com/temporalio/helm-charts/blob/main/charts/temporal/values.yaml
+#
+# Usage:
+#   helm dependency update helm/temporal
+#   helm upgrade --install temporal helm/temporal \
+#     -f helm/temporal/values.yaml \
+#     -n temporal --create-namespace
+# =============================================================================
+
+temporal:
+  # ── Replica counts (production-sized; override in values.dev.yaml) ──────────
+  server:
+    replicaCount: 1   # set to ≥2 per service in production
+
+    # ── Resource requests/limits (production baseline) ───────────────────────
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+
+    # ── Persistence / database configuration ─────────────────────────────────
+    # Cloud SQL (PostgreSQL 15) is used for both default and visibility stores.
+    # The Cloud SQL Auth Proxy sidecar (see additionalContainers below) listens
+    # on 127.0.0.1:5432 and forwards connections to the managed instance.
+    config:
+      persistence:
+        # ---- Default store (workflow execution data) ------------------------
+        default:
+          driver: "sql"
+          sql:
+            driver:   "postgres12"       # Temporal's PostgreSQL 12+ driver
+            host:     "127.0.0.1"        # Cloud SQL Auth Proxy loopback
+            port:     5432
+            database: "temporal"
+            user:     "temporal"
+            # Password is read from the Kubernetes Secret below.
+            # The secret must contain key `password`.
+            existingSecret: "temporal-db-credentials"
+            maxConns:         20
+            maxIdleConns:     10
+            maxConnLifetime:  "1h"
+            # TLS: Cloud SQL Auth Proxy handles mTLS — disable client-side TLS
+            tls:
+              enabled:            false
+              enableHostVerification: false
+
+        # ---- Visibility store (workflow search / list queries) ---------------
+        visibility:
+          driver: "sql"
+          sql:
+            driver:   "postgres12"
+            host:     "127.0.0.1"
+            port:     5432
+            database: "temporal_visibility"
+            user:     "temporal"
+            existingSecret: "temporal-db-credentials"
+            maxConns:         20
+            maxIdleConns:     10
+            maxConnLifetime:  "1h"
+            tls:
+              enabled:            false
+              enableHostVerification: false
+
+    # ── Cloud SQL Auth Proxy — additional volumes ────────────────────────────
+    # Mounts the GCP Service Account key (or uses Workload Identity — see note).
+    # NOTE: When Workload Identity is enabled on the GKE node pool, the proxy
+    # authenticates automatically and the secret volume below can be removed.
+    additionalVolumes:
+      - name: cloudsql-credentials
+        secret:
+          secretName: cloudsql-sa-key          # GCP SA JSON key secret
+          optional: true                        # omit when using Workload Identity
+
+    # ── Cloud SQL Auth Proxy — sidecar container definition ──────────────────
+    additionalContainers:
+      - name: cloud-sql-proxy
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.0
+        args:
+          # Replace PROJECT:REGION:INSTANCE with your actual Cloud SQL instance.
+          # This value is templated from a ConfigMap / Helm value in real usage;
+          # set it via --set temporal.server.additionalContainers[0].args[0]
+          - "--structured-logs"
+          - "--port=5432"
+          - "$(CLOUD_SQL_INSTANCE)"           # injected via env below
+        env:
+          - name: CLOUD_SQL_INSTANCE
+            valueFrom:
+              configMapKeyRef:
+                name: temporal-cloudsql-config
+                key:  instance_connection_name
+        volumeMounts:
+          - name:      cloudsql-credentials
+            mountPath: /secrets/cloudsql
+            readOnly:  true
+        resources:
+          requests:
+            cpu:    50m
+            memory: 64Mi
+          limits:
+            cpu:    200m
+            memory: 128Mi
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+
+    # ── Pod annotations (Prometheus scraping) ────────────────────────────────
+    podAnnotations:
+      prometheus.io/scrape: "true"
+      prometheus.io/port:   "9090"         # Temporal metrics port
+      prometheus.io/path:   "/metrics"
+
+  # ── Temporal Web UI ─────────────────────────────────────────────────────────
+  web:
+    enabled: true
+    replicaCount: 1
+
+    service:
+      type: ClusterIP
+      port: 8080
+
+    ingress:
+      enabled: false   # enable and configure per environment overlay
+
+    resources:
+      requests:
+        cpu:    100m
+        memory: 128Mi
+      limits:
+        cpu:    200m
+        memory: 256Mi
+
+    # CORS: tighten in production — allow the frontend origin only.
+    additionalEnv:
+      - name: TEMPORAL_CORS_ORIGINS
+        value: "http://localhost:3000"
+
+  # ── Admin tools (tctl, temporal CLI) ────────────────────────────────────────
+  admintools:
+    enabled: true
+    resources:
+      requests:
+        cpu:    50m
+        memory: 64Mi
+      limits:
+        cpu:    200m
+        memory: 256Mi
+
+  # ── Disable ALL bundled in-cluster databases ─────────────────────────────────
+  # We use Cloud SQL — none of the following should run in the cluster.
+  cassandra:
+    enabled: false
+
+  mysql:
+    enabled: false
+
+  postgresql:
+    enabled: false
+
+  elasticsearch:
+    enabled: false    # use advanced visibility only if required; add separately
+
+  # ── Schema migrations (auto-setup) ──────────────────────────────────────────
+  # The upstream chart ships an auto-setup job that runs tctl schema update.
+  # Enable only on first install; disable on subsequent upgrades to avoid
+  # running migrations on every helm upgrade.
+  schema:
+    setup:
+      enabled: true
+    update:
+      enabled: true
+
+  # ── Service-level configuration ──────────────────────────────────────────────
+  server:
+    config:
+      logLevel: "info"
+
+      # Namespace auto-creation (useful for lab environments)
+      namespaces:
+        - name: default
+          retention: 72h
+
+  # ── Monitoring ───────────────────────────────────────────────────────────────
+  # ServiceMonitor for Prometheus Operator (enable when kube-prometheus-stack
+  # is installed in the cluster).
+  serviceMonitor:
+    enabled: false     # set true when Prometheus Operator CRDs are present
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack   # match your Prometheus Operator selector
+
+# =============================================================================
+# Cloud SQL Auth Proxy — connection and credentials configuration
+# =============================================================================
+# These values control the ConfigMap and Secret resources created by
+# helm/temporal/templates/configmap-cloudsql.yaml and
+# helm/temporal/templates/secret-db-credentials.yaml.
+#
+# Override instanceConnectionName for every environment:
+#   helm upgrade --install temporal helm/temporal \
+#     --set cloudSql.instanceConnectionName="gke-labs:europe-west1:gke-lab-postgres-dev"
+# =============================================================================
+
+cloudSql:
+  # Cloud SQL instance connection name — format: PROJECT_ID:REGION:INSTANCE_NAME
+  # Find with: gcloud sql instances describe <INSTANCE> --format="value(connectionName)"
+  instanceConnectionName: "PROJECT:REGION:INSTANCE"  # REQUIRED — override per environment
+
+  # When true (default), an ExternalSecret is created to fetch the database
+  # password from GCP Secret Manager via External Secrets Operator.
+  # When false, a plain Kubernetes Secret is created from cloudSql.dbPassword.
+  useExternalSecrets: true
+
+  # GCP Secret Manager key name containing the Temporal database password.
+  # Used only when useExternalSecrets is true.
+  # The secret must exist: gcloud secrets describe temporal-db-password
+  secretManagerKey: "temporal-db-password"
+
+  # Database password used when useExternalSecrets is false.
+  # Leave empty when useExternalSecrets is true.
+  # WARNING: this value is stored in Helm release history — use ESO in production.
+  dbPassword: ""

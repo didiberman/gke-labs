@@ -1,0 +1,125 @@
+# =============================================================================
+# kind-cluster.yaml — Local Kubernetes cluster (kind)
+# =============================================================================
+# Creates a 4-node cluster that mirrors the GKE lab node pool layout:
+#
+#   Node                Role label          GKE equivalent
+#   ──────────────────────────────────────────────────────
+#   kind-control-plane  (control-plane)     GKE control plane (managed)
+#   kind-worker         role=application    app node pool
+#   kind-worker2        role=application    app node pool
+#   kind-worker3        role=system         system node pool
+#
+# Port mappings on the control-plane container let an Ingress controller
+# (e.g. ingress-nginx) receive traffic from the host on 80/443.
+#
+# Usage:
+#   kind create cluster --config local/kind-cluster.yaml --name gke-labs
+#   kubectl cluster-info --context kind-gke-labs
+#
+# Tear down:
+#   kind delete cluster --name gke-labs
+# =============================================================================
+
+apiVersion: kind.x-k8s.io/v1alpha4
+kind: Cluster
+
+name: gke-labs
+
+# ── Cluster-wide feature gates ─────────────────────────────────────────────────
+featureGates:
+  # Enable topology-aware hints (mirrors GKE topology-aware routing).
+  TopologyAwareHints: true
+
+# ── Networking ─────────────────────────────────────────────────────────────────
+networking:
+  # Use a non-default pod CIDR to avoid conflicts with common home networks.
+  podSubnet:     "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+  # kubeProxyMode: none  # Uncomment to test Cilium / eBPF dataplane locally
+
+# ── Nodes ──────────────────────────────────────────────────────────────────────
+nodes:
+
+  # ── Control-plane ─────────────────────────────────────────────────────────
+  # Port mappings allow the host to reach an Ingress controller running in the
+  # cluster. Install ingress-nginx targeting the control-plane node, then
+  # access it via http://localhost and https://localhost from the host.
+  - role: control-plane
+    # Extra mounts: nothing needed by default; add if you mount local code.
+    # extraMounts: []
+
+    # Expose ingress ports on the host.
+    extraPortMappings:
+      - containerPort: 80
+        hostPort:      80
+        protocol:      TCP
+        listenAddress: "127.0.0.1"
+      - containerPort: 443
+        hostPort:      443
+        protocol:      TCP
+        listenAddress: "127.0.0.1"
+      # NodePort range for direct service access without an Ingress controller.
+      - containerPort: 30000
+        hostPort:      30000
+        protocol:      TCP
+      - containerPort: 30001
+        hostPort:      30001
+        protocol:      TCP
+
+    # Patch the control-plane kubelet config to allow the ingress controller's
+    # hostNetwork pods to schedule here. The ingress-nginx DaemonSet uses
+    # tolerations for control-plane taint.
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+
+  # ── Worker node 1 — application workloads ─────────────────────────────────
+  - role: worker
+    labels:
+      role:                    application
+      # Simulate GKE node pool metadata.
+      cloud.google.com/gke-nodepool: app-pool
+      # Topology labels for pod anti-affinity / topology spread.
+      topology.kubernetes.io/zone: europe-west1-b
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "role=application,topology.kubernetes.io/zone=europe-west1-b,cloud.google.com/gke-nodepool=app-pool"
+
+  # ── Worker node 2 — application workloads ─────────────────────────────────
+  - role: worker
+    labels:
+      role:                    application
+      cloud.google.com/gke-nodepool: app-pool
+      topology.kubernetes.io/zone: europe-west1-c
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "role=application,topology.kubernetes.io/zone=europe-west1-c,cloud.google.com/gke-nodepool=app-pool"
+
+  # ── Worker node 3 — system / platform workloads ───────────────────────────
+  # System node pool hosts: ingress controllers, monitoring, cert-manager, etc.
+  # In GKE this is a separate node pool with a taint to keep app pods off it.
+  - role: worker
+    labels:
+      role:                    system
+      cloud.google.com/gke-nodepool: system-pool
+      topology.kubernetes.io/zone: europe-west1-d
+    kubeadmConfigPatches:
+      - |
+        kind: JoinConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            # Add a taint to mirror GKE system node pool behaviour.
+            # System workloads must have a toleration for this taint.
+            node-labels: "role=system,topology.kubernetes.io/zone=europe-west1-d,cloud.google.com/gke-nodepool=system-pool"
+            # Register-node-taints: "role=system:NoSchedule"
+            # Uncomment the line above to enforce system-only scheduling.

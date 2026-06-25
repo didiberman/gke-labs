@@ -1,0 +1,63 @@
+{{/*
+hpa.yaml — HorizontalPodAutoscaler for payments-api.
+
+Scales the Deployment between minReplicas and maxReplicas based on average
+CPU and memory utilisation. Conditionally created when autoscaling.enabled=true.
+
+Uses autoscaling/v2 (GA since Kubernetes 1.23) which supports multiple
+metric sources and scaling behaviour tuning.
+*/}}
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "payments-api.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "payments-api.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "payments-api.fullname" . }}
+
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+
+  metrics:
+    # Scale out when average CPU across all pods exceeds the target.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    # Scale out when average memory across all pods exceeds the target.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+
+  behavior:
+    scaleUp:
+      # Respond quickly to traffic spikes: allow doubling every 60 s.
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      # Scale down conservatively to avoid flapping.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+      selectPolicy: Min
+{{- end }}

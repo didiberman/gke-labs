@@ -1,0 +1,78 @@
+Temporal has been deployed to namespace: {{ .Release.Namespace }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  TEMPORAL — POST-INSTALL NOTES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Cloud SQL instance:
+  {{ .Values.cloudSql.instanceConnectionName }}
+
+Credentials source:
+{{- if .Values.cloudSql.useExternalSecrets }}
+  ExternalSecret "temporal-db-credentials" fetching key
+  "{{ .Values.cloudSql.secretManagerKey }}" from GCP Secret Manager
+  via SecretStore "gcp-secrets-store".
+
+  Check sync status:
+    kubectl get externalsecret temporal-db-credentials \
+      -n {{ .Release.Namespace }} \
+      -o jsonpath='{.status.conditions[0]}'
+{{- else }}
+  Plain Kubernetes Secret "temporal-db-credentials" (password
+  supplied via Helm value — not recommended for production).
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ACCESSING THE TEMPORAL WEB UI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Port-forward the Temporal Web UI to your local machine:
+
+  kubectl port-forward svc/{{ .Release.Name }}-web 8080:8080 \
+    -n {{ .Release.Namespace }}
+
+Then open: http://localhost:8080
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  USING tctl (TEMPORAL CLI)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Execute tctl commands via the admintools pod:
+
+  # Get a shell
+  kubectl exec -it deploy/{{ .Release.Name }}-admintools \
+    -n {{ .Release.Namespace }} -- bash
+
+  # Inside the pod — list namespaces
+  tctl --address {{ .Release.Name }}-frontend:7233 namespace list
+
+  # Describe a namespace
+  tctl --address {{ .Release.Name }}-frontend:7233 \
+    namespace describe --namespace default
+
+  # List recent workflow executions
+  tctl --address {{ .Release.Name }}-frontend:7233 \
+    workflow list --namespace default
+
+  # Or use the newer temporal CLI (also available in admintools):
+  temporal --address {{ .Release.Name }}-frontend:7233 \
+    workflow list --namespace default
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CHECKING CLUSTER HEALTH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  kubectl get pods -n {{ .Release.Namespace }}
+
+  # Verify Cloud SQL Auth Proxy sidecar is running in server pods:
+  kubectl get pods -n {{ .Release.Namespace }} \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[*]}{.name}{" "}{end}{"\n"}{end}'
+
+  # Check Cloud SQL Auth Proxy logs:
+  kubectl logs -n {{ .Release.Namespace }} \
+    -l app.kubernetes.io/component=frontend \
+    -c cloud-sql-proxy --tail=50
+
+For full lab walkthroughs see:
+  labs/14-temporal-workflows/README.md
+  labs/03-cloud-sql-private/README.md

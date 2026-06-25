@@ -1,0 +1,33 @@
+apiVersion: v2
+name: temporal
+description: Temporal workflow orchestration server for GKE lab — wraps the official
+  Temporal Helm chart and wires it to Cloud SQL (PostgreSQL) via a Cloud SQL Auth
+  Proxy sidecar instead of the bundled in-cluster databases.
+type: application
+
+# Wrapper chart version — bump whenever values or templates change.
+version: 0.1.0
+
+# Chart metadata (shown in Helm repo indexes).
+home: https://github.com/temporalio/helm-charts
+icon: https://avatars.githubusercontent.com/u/56493103
+keywords:
+  - temporal
+  - workflow
+  - orchestration
+  - gke
+  - cloudsql
+
+maintainers:
+  - name: gke-labs
+    email: platform@gke-labs.internal
+
+# ── Upstream dependency ───────────────────────────────────────────────────────
+# Run `helm dependency update` after cloning to pull the upstream chart into
+# charts/temporal-<version>.tgz before installing or rendering templates.
+dependencies:
+  - name: temporal
+    version: "0.54.0"
+    repository: https://go.temporal.io/helm-charts
+    # alias is not set — sub-chart values are nested under the key "temporal:"
+    # in values.yaml (matching the chart name).

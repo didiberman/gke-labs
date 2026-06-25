@@ -1,0 +1,63 @@
+# ------------------------------------------------------------------------------
+# observability/Chart.yaml
+#
+# Umbrella Helm chart that pulls together:
+#   • kube-prometheus-stack  — Prometheus Operator, Alertmanager, Grafana,
+#                              kube-state-metrics, node-exporter
+#   • loki                   — Log aggregation (SingleBinary mode for dev)
+#   • tempo                  — Distributed tracing backend
+#
+# Pinning strategy: minor-level pins (65.x.x / 6.x.x / 1.x.x) allow patch
+# updates without chart breakage. Run `helm dependency update` after any
+# version bump.
+# ------------------------------------------------------------------------------
+
+apiVersion: v2
+name: observability
+description: >
+  Full observability stack — Prometheus, Grafana, Loki, Tempo.
+  Designed for GKE dev/staging clusters with optional production overrides.
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+
+maintainers:
+  - name: platform-team
+    email: platform@example.com
+
+keywords:
+  - observability
+  - prometheus
+  - grafana
+  - loki
+  - tempo
+  - monitoring
+  - logging
+  - tracing
+
+dependencies:
+  # kube-prometheus-stack installs:
+  #   - Prometheus Operator CRDs + controller
+  #   - Prometheus  (metrics scraping & storage)
+  #   - Alertmanager (alert routing)
+  #   - Grafana      (dashboards & visualisation)
+  #   - kube-state-metrics (Kubernetes object metrics)
+  #   - prometheus-node-exporter (host-level metrics)
+  - name: kube-prometheus-stack
+    version: "65.x.x"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: kube-prometheus-stack.enabled
+
+  # Loki: horizontally-scalable log aggregation inspired by Prometheus.
+  # SingleBinary mode keeps resource usage low for dev/lab environments.
+  - name: loki
+    version: "6.x.x"
+    repository: https://grafana.github.io/helm-charts
+    condition: loki.enabled
+
+  # Tempo: Grafana's distributed tracing backend.
+  # Receives traces via OTLP (gRPC/HTTP) and Zipkin.
+  - name: tempo
+    version: "1.x.x"
+    repository: https://grafana.github.io/helm-charts
+    condition: tempo.enabled

@@ -1,0 +1,207 @@
+# =============================================================================
+# GKE Labs — .gitignore
+# =============================================================================
+#
+# INTENTIONALLY NOT GITIGNORED (committed to source control):
+#   terraform/environments/dev/terraform.tfvars.example  — Safe example values,
+#     no secrets; serves as documentation for required variables.
+#   terraform/modules/**/outputs.tf                      — Module outputs.
+#   terraform/modules/**/variables.tf                    — Variable definitions.
+#   charts/**/Chart.yaml, charts/**/values.yaml          — Helm chart metadata
+#     and default values (no secrets; secrets go in values.secret.yaml).
+#   scripts/*.sh                                         — Operational scripts.
+#   Makefile                                             — Developer UX.
+#   .terraform-version                                   — Pinned Terraform ver.
+#   package.json, package-lock.json                      — Node manifests (NOT
+#     node_modules which IS gitignored).
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Terraform
+# -----------------------------------------------------------------------------
+
+# Local .terraform directories (provider downloads, module cache)
+**/.terraform/
+
+# Terraform state files — NEVER commit state; use remote backend (GCS)
+*.tfstate
+*.tfstate.*
+
+# Terraform plan files — may contain sensitive data
+*.tfplan
+tfplan
+
+# Terraform lock file — committed in some workflows, but for a lab we ignore it
+# to avoid noise across different OS architectures. Pin versions in required_providers.
+.terraform.lock.hcl
+
+# Terraform variable files with actual values — use *.tfvars.example for docs
+terraform.tfvars
+*.auto.tfvars
+
+# Crash log
+crash.log
+crash.*.log
+
+# Override files (used for local experiments, should not be shared)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# -----------------------------------------------------------------------------
+# Helm
+# -----------------------------------------------------------------------------
+
+# Downloaded chart dependencies (fetched via `helm dependency update`)
+charts/*/charts/
+charts/**/*.tgz
+*.tgz
+
+# Secret values files — keep values.yaml but ignore values.secret.yaml
+values.secret.yaml
+values.secrets.yaml
+values.local.yaml
+
+# -----------------------------------------------------------------------------
+# Credentials & Secrets  ← HIGH PRIORITY — never commit these
+# -----------------------------------------------------------------------------
+
+# Service account key files
+service-account-*.json
+*-sa-key.json
+*-credentials.json
+
+# All JSON files EXCEPT package.json and package-lock.json
+# (Terraform state, GCP key exports, etc.)
+*.json
+!package.json
+!package-lock.json
+!**/package.json
+!**/package-lock.json
+# Allow chart metadata
+!charts/**/Chart.json
+
+# PEM certificates and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Environment secret files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.envrc
+
+# kubeconfig files with cluster credentials
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+
+# -----------------------------------------------------------------------------
+# IDE & Editor
+# -----------------------------------------------------------------------------
+
+# VS Code
+.vscode/
+
+# JetBrains IDEs (IntelliJ, GoLand, PyCharm, etc.)
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Vim/Neovim swap and backup files
+*.swp
+*.swo
+*~
+
+# Emacs
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# -----------------------------------------------------------------------------
+# macOS
+# -----------------------------------------------------------------------------
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# -----------------------------------------------------------------------------
+# Node / JavaScript / TypeScript
+# -----------------------------------------------------------------------------
+
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+*.js.map
+*.d.ts.map
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.yarn/
+.npm/
+
+# -----------------------------------------------------------------------------
+# General Logs & Temp Files
+# -----------------------------------------------------------------------------
+
+*.log
+logs/
+*.tmp
+*.temp
+tmp/
+temp/
+
+# -----------------------------------------------------------------------------
+# Docker
+# -----------------------------------------------------------------------------
+
+# Docker context tarballs
+*.tar
+
+# Override compose files with local adjustments
+docker-compose.override.yml
+docker-compose.local.yml
+
+# -----------------------------------------------------------------------------
+# Skaffold / Tilt / Local dev tooling
+# -----------------------------------------------------------------------------
+
+.tiltignore
+tilt_modules/
+
+# -----------------------------------------------------------------------------
+# Go (if any Go tooling is added)
+# -----------------------------------------------------------------------------
+
+vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out

@@ -1,0 +1,193 @@
+{{/*
+deployment.yaml — Kubernetes Deployment for payments-api.
+
+Key production features:
+  - RollingUpdate strategy with zero-downtime settings
+  - Pod & container SecurityContext (runAsNonRoot, readOnlyRootFilesystem, drop ALL caps)
+  - emptyDir /tmp volume so readOnlyRootFilesystem doesn't break temp writes
+  - Liveness / Readiness / Startup probes from values
+  - Pod anti-affinity + topology spread for HA across nodes and zones
+  - Cloud SQL Auth Proxy sidecar (conditional on cloudsqlProxy.enabled)
+  - Environment variables and node selectors from values
+  - terminationGracePeriodSeconds=30 for clean SIGTERM handling
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "payments-api.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "payments-api.labels" . | nindent 4 }}
+spec:
+  # replicaCount is the floor; HPA will scale up from here when enabled.
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "payments-api.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Allow one extra pod during rollout to ensure traffic is never dropped.
+      maxSurge: 1
+      # Never take more than one pod offline at a time.
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        {{- include "payments-api.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # ---------------------------------------------------------------------------
+      # Service Account
+      # ---------------------------------------------------------------------------
+      serviceAccountName: {{ include "payments-api.serviceAccountName" . }}
+      automountServiceAccountToken: true
+
+      # ---------------------------------------------------------------------------
+      # Pod-level security context
+      # ---------------------------------------------------------------------------
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      # ---------------------------------------------------------------------------
+      # Termination
+      # ---------------------------------------------------------------------------
+      terminationGracePeriodSeconds: 30
+
+      # ---------------------------------------------------------------------------
+      # Node scheduling
+      # ---------------------------------------------------------------------------
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # Spread pods across availability zones.
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      # ---------------------------------------------------------------------------
+      # Volumes
+      # ---------------------------------------------------------------------------
+      volumes:
+        # Required because containerSecurityContext.readOnlyRootFilesystem=true.
+        # Any library/runtime that writes to /tmp will use this emptyDir instead.
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.cloudsqlProxy.enabled }}
+        # Cloud SQL Auth Proxy uses a Unix socket written to this shared dir.
+        - name: cloudsql-socket
+          emptyDir: {}
+        {{- end }}
+
+      # ---------------------------------------------------------------------------
+      # Init containers (none by default — placeholder for future use)
+      # ---------------------------------------------------------------------------
+
+      # ---------------------------------------------------------------------------
+      # Containers
+      # ---------------------------------------------------------------------------
+      containers:
+        # -----------------------------------------------------------------------
+        # Main application container
+        # -----------------------------------------------------------------------
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+
+          # Container-level security context (defence-in-depth with pod context).
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+
+          # Environment variables (arbitrary list from values).
+          {{- with .Values.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          # Resource requests and limits — always set to enable VPA / HPA.
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          # Volume mounts.
+          volumeMounts:
+            # Writable /tmp for any runtime temp-file usage.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.cloudsqlProxy.enabled }}
+            # Shared Unix socket directory for Cloud SQL Proxy.
+            - name: cloudsql-socket
+              mountPath: /cloudsql
+            {{- end }}
+
+          # ------------------------------------------------------------------
+          # Probes
+          # ------------------------------------------------------------------
+
+          # startupProbe gates liveness/readiness until the app has started.
+          # failureThreshold * periodSeconds = max startup time budget.
+          startupProbe:
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+
+          # livenessProbe restarts the container if the app becomes unhealthy.
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+
+          # readinessProbe gates traffic routing — pod is only in service
+          # when this passes successfully.
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+
+        # -----------------------------------------------------------------------
+        # Cloud SQL Auth Proxy sidecar (conditional)
+        # Authenticates to Cloud SQL using the pod's Workload Identity and
+        # exposes a local Unix-socket that the main container connects to.
+        # -----------------------------------------------------------------------
+        {{- if .Values.cloudsqlProxy.enabled }}
+        - name: cloud-sql-proxy
+          image: {{ .Values.cloudsqlProxy.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--structured-logs"
+            - "--unix-socket=/cloudsql"
+            - {{ .Values.cloudsqlProxy.connectionName | quote }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            {{- toYaml .Values.cloudsqlProxy.resources | nindent 12 }}
+          volumeMounts:
+            - name: cloudsql-socket
+              mountPath: /cloudsql
+            - name: tmp
+              mountPath: /tmp
+        {{- end }}

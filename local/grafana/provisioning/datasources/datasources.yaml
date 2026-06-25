@@ -1,0 +1,114 @@
+# =============================================================================
+# datasources.yaml — Grafana datasource provisioning
+# =============================================================================
+# This file is auto-loaded by Grafana on startup from the provisioning path.
+# Datasources defined here cannot be deleted via the UI (deleteable: false).
+# Changes to this file take effect after:
+#   docker compose restart grafana
+# or via the reload API:
+#   curl -s -u admin:admin -X POST http://localhost:3000/api/admin/provisioning/datasources/reload
+# =============================================================================
+
+apiVersion: 1
+
+# Delete any datasources not listed here (keeps the UI clean on re-provision).
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+  - name: Loki
+    orgId: 1
+  - name: Tempo
+    orgId: 1
+
+datasources:
+
+  # ── Prometheus ─────────────────────────────────────────────────────────────
+  - name:      Prometheus
+    type:      prometheus
+    access:    proxy
+    orgId:     1
+    url:       http://prometheus:9090
+    isDefault: true
+    editable:  false
+    uid:       prometheus-local
+
+    jsonData:
+      httpMethod:                POST
+      timeInterval:              15s
+      exemplarTraceIdDestinations:
+        # Wire exemplars to Tempo for trace drill-down from metric panels.
+        - name:         trace_id
+          datasourceUid: tempo-local
+
+  # ── Loki ────────────────────────────────────────────────────────────────────
+  - name:    Loki
+    type:    loki
+    access:  proxy
+    orgId:   1
+    url:     http://loki:3100
+    editable: false
+    uid:     loki-local
+
+    jsonData:
+      maxLines: 5000
+      derivedFields:
+        # Extract trace IDs from log lines and link them to Tempo.
+        # Matches common formats: traceID=xxx, trace_id=xxx, "traceId":"xxx"
+        - matcherRegex: '(?:traceID|trace_id|traceId)[:=]"?([0-9a-fA-F]+)"?'
+          name:         TraceID
+          url:          "$${__value.raw}"
+          datasourceUid: tempo-local
+          urlDisplayLabel: "View trace in Tempo"
+
+  # ── Tempo ────────────────────────────────────────────────────────────────────
+  - name:    Tempo
+    type:    tempo
+    access:  proxy
+    orgId:   1
+    url:     http://tempo:3200
+    editable: false
+    uid:     tempo-local
+
+    jsonData:
+      # Tempo HTTP API backend
+      httpMethod: GET
+
+      # ---- Trace to logs correlation ----------------------------------------
+      tracesToLogsV2:
+        datasourceUid:    loki-local
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift:   "1m"
+        # Map Tempo span tags to Loki label matchers.
+        tags:
+          - key:   service.name
+            value: service_name
+        filterByTraceID:  true
+        filterBySpanID:   false
+
+      # ---- Trace to metrics correlation ------------------------------------
+      tracesToMetrics:
+        datasourceUid: prometheus-local
+        spanStartTimeShift: "-15m"
+        spanEndTimeShift:   "15m"
+        tags:
+          - key:   service.name
+            value: service_name
+        queries:
+          - name:  "Request rate"
+            query: "rate(traces_spanmetrics_calls_total{$$__tags}[5m])"
+          - name:  "Error rate"
+            query: "rate(traces_spanmetrics_calls_total{$$__tags,status_code=\"STATUS_CODE_ERROR\"}[5m])"
+          - name:  "Latency p99"
+            query: "histogram_quantile(0.99, rate(traces_spanmetrics_latency_bucket{$$__tags}[5m]))"
+
+      # ---- Service graph ---------------------------------------------------
+      serviceMap:
+        datasourceUid: prometheus-local
+
+      # ---- Trace search (via Tempo search API) ----------------------------
+      search:
+        hide: false
+
+      # ---- Node graph (dependency map) ------------------------------------
+      nodeGraph:
+        enabled: true
