@@ -42,7 +42,7 @@ serviceAccount:
 # Cloud SQL Auth Proxy sidecar
 cloudsqlProxy:
   enabled: true
-  connectionName: "gke-labs:europe-west1:gke-labs-postgres-dev"
+  connectionName: "gke-labs-500515:europe-west1:gke-labs-postgres-dev"
   image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4
   resources:
     requests:

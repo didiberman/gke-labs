@@ -57,24 +57,24 @@ provider "google-beta" {
 # Manager).  Never check the resulting .tfstate into version control.
 ################################################################################
 
-# Database password: 20 chars, alphanumeric + safe specials
+# Database password for the payments-api user
 resource "random_password" "db_password" {
   length           = 20
   special          = true
   override_special = "!#$%&*()-_=+[]{}<>:?"
-  # Regenerating the password would rotate the DB credential; guard it.
-  lifecycle {
-    ignore_changes = [result]
-  }
+}
+
+# Database password for the temporal user
+resource "random_password" "temporal_db_password" {
+  length           = 20
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}<>:?"
 }
 
 # JWT signing secret: 64 chars, alphanumeric only (Base64-safe)
 resource "random_password" "jwt_secret" {
   length  = 64
   special = false
-  lifecycle {
-    ignore_changes = [result]
-  }
 }
 
 ################################################################################
@@ -87,7 +87,6 @@ module "networking" {
   project_id = var.project_id
   region     = var.region
   name       = var.name
-  env        = var.env
   labels     = var.labels
 }
 
@@ -101,7 +100,6 @@ module "iam" {
 
   project_id = var.project_id
   name       = var.name
-  env        = var.env
   labels     = var.labels
 }
 
@@ -120,19 +118,31 @@ module "gke" {
   labels     = var.labels
 
   # Networking inputs
-  network                = module.networking.network_name
-  subnetwork             = module.networking.subnetwork_name
-  pods_secondary_range   = module.networking.pods_secondary_range_name
-  services_secondary_range = module.networking.services_secondary_range_name
-  master_ipv4_cidr_block = module.networking.master_ipv4_cidr_block
+  vpc_name            = module.networking.vpc_name
+  subnet_name         = module.networking.subnet_name
+  pods_range_name     = module.networking.pods_range_name
+  services_range_name = module.networking.services_range_name
 
   # IAM inputs — use the node-pool SA created by the iam module
-  node_service_account = module.iam.gke_node_service_account_email
+  node_sa_email = module.iam.gke_node_sa_email
 
   depends_on = [
     module.networking,
     module.iam,
   ]
+}
+
+################################################################################
+# Workload Identity binding — payments-api
+# Must be created AFTER the GKE cluster because the Workload Identity Pool
+# (PROJECT.svc.id.goog) only exists once the cluster is provisioned.
+################################################################################
+resource "google_service_account_iam_member" "payments_api_workload_identity" {
+  service_account_id = module.iam.payments_api_sa_id
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[payments/payments-api]"
+
+  depends_on = [module.gke]
 }
 
 ################################################################################
@@ -150,11 +160,12 @@ module "cloud_sql" {
   labels     = var.labels
 
   # Networking inputs — Cloud SQL uses Private Service Access
-  network_id             = module.networking.network_id
-  private_ip_address     = module.networking.sql_private_ip_address
+  vpc_id                = module.networking.vpc_id
+  private_ip_range_name = module.networking.private_ip_range_name
 
   # Credentials — generated above, never sourced from tfvars
-  db_password = random_password.db_password.result
+  db_password          = random_password.db_password.result
+  temporal_db_password = random_password.temporal_db_password.result
 
   depends_on = [
     module.networking,
@@ -175,7 +186,8 @@ module "memorystore" {
   labels     = var.labels
 
   # Networking inputs
-  network_id = module.networking.network_id
+  vpc_id                = module.networking.vpc_id
+  private_ip_range_name = module.networking.private_ip_range_name
 
   depends_on = [
     module.networking,
@@ -189,11 +201,11 @@ module "memorystore" {
 module "storage" {
   source = "../../modules/storage"
 
-  project_id = var.project_id
-  region     = var.region
-  name       = var.name
-  env        = var.env
-  labels     = var.labels
+  project_id           = var.project_id
+  region               = var.region
+  name                 = var.name
+  payments_api_sa_email = module.iam.payments_api_sa_email
+  labels               = var.labels
 }
 
 ################################################################################
@@ -206,8 +218,10 @@ module "secret_manager" {
 
   project_id = var.project_id
   name       = var.name
-  env        = var.env
   labels     = var.labels
+
+  # SA that gets secretAccessor on every secret
+  accessor_sa_email = module.iam.payments_api_sa_email
 
   # Secrets sourced from random_password resources and sibling modules
   db_password       = random_password.db_password.result

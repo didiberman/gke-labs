@@ -20,9 +20,10 @@
 resource "google_container_cluster" "main" {
   provider = google
 
-  name     = "${var.name}-${var.env}"
-  location = var.region
-  project  = var.project_id
+  name               = "${var.name}-${var.env}"
+  location           = var.region
+  project            = var.project_id
+  deletion_protection = false
 
   # ---------------------------------------------------------------------------
   # We immediately remove the default node pool and manage node pools
@@ -246,8 +247,8 @@ resource "google_container_node_pool" "application" {
 
   node_config {
     machine_type = "e2-standard-2"
-    disk_size_gb = 100
-    disk_type    = "pd-ssd"
+    disk_size_gb = 50
+    disk_type    = "pd-standard"
 
     service_account = var.node_sa_email
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]

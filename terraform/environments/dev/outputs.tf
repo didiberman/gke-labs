@@ -67,6 +67,7 @@ output "cloud_sql_instance_connection_name" {
 output "cloud_sql_private_ip" {
   description = "Private IP address of the Cloud SQL instance (accessible from within the VPC)."
   value       = module.cloud_sql.private_ip_address
+  sensitive   = true
 }
 
 # ------------------------------------------------------------------------------
@@ -117,12 +118,12 @@ output "registry_url" {
 
 output "network_name" {
   description = "Name of the shared VPC network."
-  value       = module.networking.network_name
+  value       = module.networking.vpc_name
 }
 
 output "subnetwork_name" {
   description = "Name of the primary GKE subnetwork."
-  value       = module.networking.subnetwork_name
+  value       = module.networking.subnet_name
 }
 
 # ------------------------------------------------------------------------------
@@ -131,7 +132,7 @@ output "subnetwork_name" {
 
 output "summary" {
   description = "Human-readable summary of all key environment values."
-  sensitive   = false
+  sensitive   = true
   value       = <<-EOT
 
     ╔══════════════════════════════════════════════════════════════════╗

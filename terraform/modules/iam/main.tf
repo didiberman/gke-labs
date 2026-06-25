@@ -130,14 +130,9 @@ resource "google_project_iam_member" "payments_api_storage_project" {
 # The K8s SA is referenced as:
 #   serviceAccount:<project>.svc.id.goog[<namespace>/<sa-name>]
 # ---------------------------------------------------------------------------
-resource "google_service_account_iam_member" "payments_api_workload_identity" {
-  service_account_id = google_service_account.payments_api.name
-  role               = "roles/iam.workloadIdentityUser"
-
-  # The Kubernetes SA that will impersonate this GCP SA via Workload Identity.
-  # Format: serviceAccount:<project_id>.svc.id.goog[<namespace>/<k8s-sa-name>]
-  member = "serviceAccount:${var.project_id}.svc.id.goog[payments/payments-api]"
-}
+# NOTE: The Workload Identity IAM binding for payments_api is intentionally
+# created in the root module (main.tf) after the GKE cluster is provisioned,
+# because the Workload Identity Pool (*.svc.id.goog) only exists once GKE is up.
 
 # ---------------------------------------------------------------------------
 # 4. Artifact Registry — Docker repository

@@ -112,7 +112,7 @@ data:
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "editorMode": "code",
               "expr": "100 - (avg by (node) (rate(node_cpu_seconds_total{mode=\"idle\"}[$__rate_interval])) * 100)",
-              "legendFormat": "{{node}}",
+              "legendFormat": "{{ "{{node}}" }}",
               "range": true,
               "refId": "A"
             }
@@ -171,7 +171,7 @@ data:
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "editorMode": "code",
               "expr": "100 * (1 - ((node_memory_MemAvailable_bytes) / (node_memory_MemTotal_bytes)))",
-              "legendFormat": "{{instance}}",
+              "legendFormat": "{{ "{{instance}}" }}",
               "range": true,
               "refId": "A"
             }
@@ -229,7 +229,7 @@ data:
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "editorMode": "code",
               "expr": "count by (namespace) (kube_pod_info{pod_phase=\"Running\"} == 1) or count by (namespace) (kube_pod_status_phase{phase=\"Running\"} == 1)",
-              "legendFormat": "{{namespace}}",
+              "legendFormat": "{{ "{{namespace}}" }}",
               "range": true,
               "refId": "A"
             }
@@ -286,7 +286,7 @@ data:
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "editorMode": "code",
               "expr": "increase(kube_pod_container_status_restarts_total[5m]) > 0",
-              "legendFormat": "{{namespace}}/{{pod}}/{{container}}",
+              "legendFormat": "{{ "{{namespace}}" }}/{{ "{{pod}}" }}/{{ "{{container}}" }}",
               "range": true,
               "refId": "A"
             }
@@ -353,7 +353,7 @@ data:
               "datasource": { "type": "prometheus", "uid": "prometheus" },
               "editorMode": "code",
               "expr": "sum by (status_class) (\n  label_replace(\n    rate(http_requests_total{job=\"payments-api\"}[$__rate_interval]),\n    \"status_class\",\n    \"$1xx\",\n    \"status_code\",\n    \"([0-9]).*\"\n  )\n)",
-              "legendFormat": "HTTP {{status_class}}",
+              "legendFormat": "HTTP {{ "{{status_class}}" }}",
               "range": true,
               "refId": "A"
             },

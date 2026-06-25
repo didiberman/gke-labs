@@ -162,8 +162,6 @@ resource "google_compute_firewall" "allow_internal" {
   allow {
     protocol = "icmp"
   }
-
-  labels = var.labels
 }
 
 # ---------------------------------------------------------------------------
@@ -187,6 +185,4 @@ resource "google_compute_firewall" "allow_gke_master" {
     protocol = "tcp"
     ports    = ["443", "8443", "10250"]
   }
-
-  labels = var.labels
 }
